@@ -1,0 +1,35 @@
+
+#[ C,C++,C#,Java,JavaScript,Rust,Go,Swift,Kotlin ]
+```ol
+//:>[ Header ]
+//: Content
+//|>[ Header ]
+//| Content
+```
+#[ Python,Ruby,Shell,Perl,R,Nix,YAML,TOML ]
+```ol
+#:>[ Header ]
+#: Content
+#|>[ Header ]
+#| Content
+```
+#[ SQL,Lua,Haskell ]
+```ol
+--:>[ Header ]
+--: Content
+--|>[ Header ]
+--| Content
+```
+#[ HTML,XML ]
+```ol
+<!-- |>Header -->
+```
+#[ Lisp ]
+```ol
+;>
+;|>[ Header ]
+```
+#[ Misc ]
+(Pascal)[`//`]
+(OCaml)[`(* ... *)`]
+(Erlang,MD,LaTeX)[`% comment`]
