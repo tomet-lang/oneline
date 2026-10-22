@@ -59,7 +59,7 @@ struct DocStats {
 - [ ] Expose `stats(&self, input: &str) -> Result<DocStats>` on `GpuParser`.
 - [ ] Add `--pattern` and `--stats` flags to `oneline query` CLI.
 - [ ] Add unit tests verifying keyword matching and statistics accuracy.
-- [ ] Benchmark query throughput (expected: 5+ GB/s on RTX 3060).
+- [x] Benchmark query throughput: substring search reaches ~250 GB/s kernel-only, 5x the CPU on resident text (see `gpu-substring-search.md`).
 
 ## Status / prerequisites (updated)
 
@@ -82,3 +82,12 @@ on an RTX 3060 the CPU's parallel filter over parsed nodes is 5-15x faster than 
 vs a 12-core CPU (~60 GB/s) is a real difference. Do `gpu-profiling-and-overhead.md` first (the ~1 ms query
 floor would swamp a sub-millisecond kernel), then implement substring search as the deciding benchmark, with a
 CPU baseline (`memchr`-style SIMD search on 12 threads) in `benches/benches/comparison.rs`.
+
+## Status update: substring search done (see `gpu-substring-search.md`)
+
+Substring search is implemented and was the deciding experiment: on resident text with selective patterns
+the GPU is 4-5x faster than a 12-thread memmem (0.65 ms vs 3.3 ms at 128 MB); with dense matches or cold it
+loses. `DocStats` and the `--pattern/--stats` flags on `oneline query` are still not done; the structural
+`--stats` histogram reads only nodes, which the profiling results say is at best parity with the CPU, so it is
+low priority. Line-oriented search (match positions mapped to lines, restricted to the content span) is also
+open: today `search_*` works on raw bytes.
