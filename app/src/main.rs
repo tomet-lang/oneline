@@ -95,10 +95,9 @@ fn main() -> Result<()> {
             let tree = match engine {
                 Engine::Simd => oneline_simd::parse(&content),
                 Engine::Gpu => {
-                    let offsets = oneline_simd::scan_line_offsets(content.as_bytes());
                     let parser = oneline_gpu::GpuParser::new()
                         .context("Failed to initialize GPU parser")?;
-                    parser.parse(&content, &offsets)?
+                    parser.parse_raw(&content)?
                 }
             };
 
@@ -154,24 +153,35 @@ fn main() -> Result<()> {
                 println!("    Throughput:      {:.2} GB/s", throughput_gbps);
             }
 
-            // 2. GPU Benchmark
+            // 2. GPU Full End-to-End Benchmark (Prefix Scan + Line Parse)
             match oneline_gpu::GpuParser::new() {
                 Ok(parser) => {
-                    let offsets = oneline_simd::scan_line_offsets(bytes);
-
                     // Warmup
-                    let _ = parser.parse(&content, &offsets)?;
+                    let _ = parser.parse_raw(&content)?;
 
                     let start = Instant::now();
                     for _ in 0..iterations {
-                        let _ = parser.parse(&content, &offsets)?;
+                        let _ = parser.parse_raw(&content)?;
                     }
                     let elapsed = start.elapsed();
                     let avg_time = elapsed / iterations as u32;
                     let throughput_gbps = (total_bytes / 1_000_000_000.0) / avg_time.as_secs_f64();
-                    println!("\n  [wgpu Compute (GPU: RTX 3060)]");
+                    println!("\n  [wgpu GPU Full Pipeline (Prefix Scan + Line Parse)]");
                     println!("    Average Latency: {:?}", avg_time);
                     println!("    Throughput:      {:.2} GB/s", throughput_gbps);
+
+                    // Also show pure kernel time with precomputed offsets
+                    let offsets = oneline_simd::scan_line_offsets(bytes);
+                    let start_k = Instant::now();
+                    for _ in 0..iterations {
+                        let _ = parser.parse(&content, &offsets)?;
+                    }
+                    let elapsed_k = start_k.elapsed();
+                    let avg_k = elapsed_k / iterations as u32;
+                    let throughput_k = (total_bytes / 1_000_000_000.0) / avg_k.as_secs_f64();
+                    println!("\n  [wgpu GPU Kernel (Precomputed Offsets)]");
+                    println!("    Average Latency: {:?}", avg_k);
+                    println!("    Throughput:      {:.2} GB/s", throughput_k);
                 }
                 Err(e) => {
                     eprintln!("\n  [wgpu Compute (GPU)]: Skipped (GPU unavailable: {:?})", e);
@@ -193,7 +203,7 @@ fn main() -> Result<()> {
                 .context("Failed to initialize GPU parser for query")?;
 
             if let Some(mb) = bench_mb {
-                println!("==> Benchmarking GPU-Resident Query on Synthetic {} MB dataset...", mb);
+                println!("==> Benchmarking 100% GPU-Resident Query on Synthetic {} MB dataset...", mb);
                 let sample = "|>[ Header ]\n| Regular paragraph text\n||>[ Callout ]\n|| Body text\n|||- List item A\n|||- List item B\n| @card(title: \"test\")\n|| Card content\n";
                 let target_bytes = mb * 1024 * 1024;
                 let repeats = target_bytes / sample.len() + 1;
@@ -201,23 +211,22 @@ fn main() -> Result<()> {
                 for _ in 0..repeats {
                     content.push_str(sample);
                 }
-                let offsets = oneline_simd::scan_line_offsets(content.as_bytes());
                 let total_bytes = content.len() as f64;
 
-                let _ = parser.query(&content, &offsets, node_kind, depth, 1024)?;
+                let _ = parser.query_raw(&content, node_kind, depth, 1024)?;
 
                 let iters = 20;
                 let start = Instant::now();
                 let mut match_count = 0;
                 for _ in 0..iters {
-                    let matches = parser.query(&content, &offsets, node_kind, depth, 1024)?;
+                    let matches = parser.query_raw(&content, node_kind, depth, 1024)?;
                     match_count = matches.len();
                 }
                 let elapsed = start.elapsed();
                 let avg_time = elapsed / iters as u32;
                 let throughput_gbps = (total_bytes / 1_000_000_000.0) / avg_time.as_secs_f64();
 
-                println!("\n  [GPU-Resident Query (Filter entirely in VRAM)]");
+                println!("\n  [100% GPU-Resident Query (Prefix Scan + Parse + Filter in VRAM)]");
                 println!("    Filter criteria: kind={:?}, depth={:?}", node_kind, depth);
                 println!("    Sample matches:  {} matches found", match_count);
                 println!("    Average Latency: {:?}", avg_time);
@@ -225,10 +234,10 @@ fn main() -> Result<()> {
             } else if let Some(file_path) = file {
                 let content = std::fs::read_to_string(&file_path)
                     .with_context(|| format!("Failed to read file: {}", file_path.display()))?;
-                let offsets = oneline_simd::scan_line_offsets(content.as_bytes());
-                let matches = parser.query(&content, &offsets, node_kind, depth, 100)?;
+                let offsets = parser.scan_line_offsets(&content)?;
+                let matches = parser.query_raw(&content, node_kind, depth, 100)?;
 
-                println!("==> Found {} matching lines in {} (GPU-Resident Query):", matches.len(), file_path.display());
+                println!("==> Found {} matching lines in {} (100% GPU Pipeline):", matches.len(), file_path.display());
                 for &idx in &matches {
                     let start = offsets[idx as usize] as usize;
                     let end = if (idx as usize) + 1 < offsets.len() {
