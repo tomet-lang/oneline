@@ -1,0 +1,167 @@
+use std::path::PathBuf;
+use std::time::Instant;
+
+use anyhow::{Context, Result};
+use clap::{Parser, Subcommand, ValueEnum};
+use mimalloc::MiMalloc;
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
+
+#[derive(Parser)]
+#[command(name = "oneline", author, version, about = "High-performance SIMD/GPU parser for oneline format")]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Parse specified file and display tree structure
+    Parse {
+        /// Path to input file
+        file: PathBuf,
+
+        /// Parse engine (simd or gpu)
+        #[arg(short, long, default_value = "simd")]
+        engine: Engine,
+
+        /// Convert to canonical tomet-ast Document and display
+        #[arg(long)]
+        to_ast: bool,
+    },
+    /// Benchmark parsing throughput and latency (file or synthetic dataset)
+    Bench {
+        /// Path to input file (defaults to synthetic dataset if omitted)
+        file: Option<PathBuf>,
+
+        /// Size of synthetic dataset in megabytes
+        #[arg(long, default_value_t = 10)]
+        synthetic_mb: usize,
+
+        /// Number of iterations
+        #[arg(short, long, default_value_t = 20)]
+        iterations: usize,
+    },
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+enum Engine {
+    Simd,
+    Gpu,
+}
+
+fn ensure_nixos_vulkan_paths() {
+    let current = std::env::var("LD_LIBRARY_PATH").unwrap_or_default();
+    let vulkan_driver_path = "/run/opengl-driver/lib";
+    let nix_vulkan_loader = "/nix/store/lk4614327cn1h9z3m6cvnls95n13m1cj-vulkan-loader-1.4.357.0/lib";
+
+    if !current.contains(vulkan_driver_path) || !current.contains(nix_vulkan_loader) {
+        let new_path = format!("{}:{}:{}", current, vulkan_driver_path, nix_vulkan_loader);
+        unsafe {
+            std::env::set_var("LD_LIBRARY_PATH", new_path);
+        }
+    }
+}
+
+fn main() -> Result<()> {
+    ensure_nixos_vulkan_paths();
+    let cli = Cli::parse();
+
+    match cli.command {
+        Commands::Parse { file, engine, to_ast } => {
+            let content = std::fs::read_to_string(&file)
+                .with_context(|| format!("Failed to read file: {}", file.display()))?;
+
+            println!("==> Parsing {} ({} bytes) using {:?} engine...", file.display(), content.len(), engine);
+
+            let tree = match engine {
+                Engine::Simd => oneline_simd::parse(&content),
+                Engine::Gpu => {
+                    let offsets = oneline_simd::scan_line_offsets(content.as_bytes());
+                    let parser = oneline_gpu::GpuParser::new()
+                        .context("Failed to initialize GPU parser")?;
+                    parser.parse(&content, &offsets)?
+                }
+            };
+
+            if to_ast {
+                let ast = oneline_tomet::to_tomet_ast(&tree)
+                    .context("Failed to convert FlatTree to tomet AST")?;
+                println!("\nTomet AST Document ({} top-level blocks):", ast.blocks.len());
+                for (i, block) in ast.blocks.iter().enumerate() {
+                    println!("  [{}] {:#?}", i, block);
+                }
+            } else {
+                println!("\nParsed Tree ({} lines):", tree.nodes.len());
+                print!("{}", tree.dump_tree());
+            }
+        }
+        Commands::Bench { file, synthetic_mb, iterations } => {
+            let (name, content) = match file {
+                Some(p) => {
+                    let s = std::fs::read_to_string(&p)
+                        .with_context(|| format!("Failed to read file: {}", p.display()))?;
+                    (p.display().to_string(), s)
+                }
+                None => {
+                    println!("==> Generating synthetic oneline dataset ({} MB)...", synthetic_mb);
+                    let sample = "|>[ Header ]\n| Is this syntax necessary?\n||>[ Callout ]\n|| Content.\n|||- Item A\n|||- Item B\n";
+                    let target_bytes = synthetic_mb * 1024 * 1024;
+                    let repeats = target_bytes / sample.len() + 1;
+                    let mut s = String::with_capacity(repeats * sample.len());
+                    for _ in 0..repeats {
+                        s.push_str(sample);
+                    }
+                    (format!("Synthetic {}MB", synthetic_mb), s)
+                }
+            };
+
+            let bytes = content.as_bytes();
+            let total_bytes = bytes.len() as f64;
+            let mb_size = total_bytes / (1024.0 * 1024.0);
+
+            println!("==> Benchmarking {} ({:.2} MB, {} iterations)\n", name, mb_size, iterations);
+
+            // 1. CPU SIMD Benchmark
+            {
+                let start = Instant::now();
+                for _ in 0..iterations {
+                    let _ = oneline_simd::parse(&content);
+                }
+                let elapsed = start.elapsed();
+                let avg_time = elapsed / iterations as u32;
+                let throughput_gbps = (total_bytes / 1_000_000_000.0) / avg_time.as_secs_f64();
+                println!("  [CPU SIMD]");
+                println!("    Average Latency: {:?}", avg_time);
+                println!("    Throughput:      {:.2} GB/s", throughput_gbps);
+            }
+
+            // 2. GPU Benchmark
+            match oneline_gpu::GpuParser::new() {
+                Ok(parser) => {
+                    let offsets = oneline_simd::scan_line_offsets(bytes);
+
+                    // Warmup
+                    let _ = parser.parse(&content, &offsets)?;
+
+                    let start = Instant::now();
+                    for _ in 0..iterations {
+                        let _ = parser.parse(&content, &offsets)?;
+                    }
+                    let elapsed = start.elapsed();
+                    let avg_time = elapsed / iterations as u32;
+                    let throughput_gbps = (total_bytes / 1_000_000_000.0) / avg_time.as_secs_f64();
+                    println!("\n  [wgpu Compute (GPU: RTX 3060)]");
+                    println!("    Average Latency: {:?}", avg_time);
+                    println!("    Throughput:      {:.2} GB/s", throughput_gbps);
+                }
+                Err(e) => {
+                    eprintln!("\n  [wgpu Compute (GPU)]: Skipped (GPU unavailable: {:?})", e);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}

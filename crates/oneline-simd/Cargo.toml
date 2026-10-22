@@ -1,0 +1,9 @@
+[package]
+name = "oneline-simd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+oneline-core = { workspace = true }
+anyhow = { workspace = true }

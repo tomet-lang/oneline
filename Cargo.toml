@@ -1,0 +1,48 @@
+[workspace]
+resolver = "3"
+members = [
+  "app",
+  "crates/oneline-core",
+  "crates/oneline-simd",
+  "crates/oneline-gpu",
+  "crates/oneline-tomet",
+]
+
+default-members = ["app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+oneline-core = { path = "crates/oneline-core" }
+oneline-simd = { path = "crates/oneline-simd" }
+oneline-gpu = { path = "crates/oneline-gpu" }
+oneline-tomet = { path = "crates/oneline-tomet" }
+oneline-cli = { path = "app" }
+
+#= Tomet
+tomet-ast = { path = "../tomet/crates/tomet-syntax-ast" }
+tomet-parser = { path = "../tomet/crates/tomet-syntax-parser" }
+
+#= GPU & Parallelism
+wgpu = "24"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+
+#= Crates.io
+anyhow = "1"
+clap = { version = "4.5", features = ["derive"] }
+mimalloc = { version = "0.1", default-features = false }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev.package."*"]
+opt-level = 3

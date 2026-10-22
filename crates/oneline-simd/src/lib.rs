@@ -1,0 +1,210 @@
+use oneline_core::{FlatNode, FlatTree, NodeKind};
+
+/// Scans line breaks quickly and returns starting byte offsets for each line.
+pub fn scan_line_offsets(bytes: &[u8]) -> Vec<u32> {
+    let mut offsets = Vec::with_capacity(bytes.len() / 40 + 1);
+    if bytes.is_empty() {
+        return offsets;
+    }
+
+    // Line 1 always starts at offset 0.
+    offsets.push(0);
+
+    let mut i = 0;
+    let len = bytes.len();
+
+    // 8-byte SWAR (SIMD Within A Register) scan for '\n'.
+    while i + 8 <= len {
+        let chunk = u64::from_ne_bytes(bytes[i..i + 8].try_into().unwrap());
+        // Detect match with 0x0a ('\n') using bitwise operations.
+        let match_mask = chunk ^ 0x0a0a0a0a_0a0a0a0a;
+        let zero_byte_mask = (match_mask.wrapping_sub(0x01010101_01010101)) & (!match_mask) & 0x80808080_80808080;
+
+        if zero_byte_mask != 0 {
+            // Byte matches detected; check scalar offsets.
+            for b in 0..8 {
+                if bytes[i + b] == b'\n' {
+                    let next = (i + b + 1) as u32;
+                    if (next as usize) < len {
+                        offsets.push(next);
+                    }
+                }
+            }
+        }
+        i += 8;
+    }
+
+    // Process remaining trailing bytes in scalar mode.
+    while i < len {
+        if bytes[i] == b'\n' {
+            let next = (i + 1) as u32;
+            if (next as usize) < len {
+                offsets.push(next);
+            }
+        }
+        i += 1;
+    }
+
+    offsets
+}
+
+/// Parses a single line byte slice into a FlatNode.
+#[inline]
+pub fn parse_line(line_bytes: &[u8], line_start: u32) -> FlatNode {
+    let len = line_bytes.len();
+    if len == 0 {
+        return FlatNode::new(0, NodeKind::Blank, line_start, 0);
+    }
+
+    // Exclude trailing '\r' and '\n' from effective length.
+    let mut eff_len = len;
+    while eff_len > 0 && (line_bytes[eff_len - 1] == b'\r' || line_bytes[eff_len - 1] == b'\n') {
+        eff_len -= 1;
+    }
+
+    if eff_len == 0 {
+        return FlatNode::new(0, NodeKind::Blank, line_start, 0);
+    }
+
+    // Count consecutive prefix '|' characters (nesting depth).
+    let mut depth = 0;
+    while depth < eff_len && line_bytes[depth] == b'|' {
+        depth += 1;
+    }
+
+    // Skip whitespace immediately following the prefix.
+    let mut content_start = depth;
+    while content_start < eff_len && (line_bytes[content_start] == b' ' || line_bytes[content_start] == b'\t') {
+        content_start += 1;
+    }
+
+    let span_start = line_start + content_start as u32;
+    let span_len = (eff_len - content_start) as u32;
+
+    if span_len == 0 {
+        return FlatNode::new(depth as u32, NodeKind::Blank, span_start, 0);
+    }
+
+    let rest = &line_bytes[content_start..eff_len];
+    let kind = classify_line(rest);
+
+    FlatNode::new(depth as u32, kind, span_start, span_len)
+}
+
+/// Classifies syntax kind from leading line tokens (tomet / oneline compatible).
+#[inline]
+fn classify_line(bytes: &[u8]) -> NodeKind {
+    if bytes.is_empty() {
+        return NodeKind::Blank;
+    }
+
+    match bytes[0] {
+        b'=' => {
+            // Heading: =[ Header ] or ==[ Subheader ]
+            NodeKind::Heading
+        }
+        b'>' => {
+            // Callout or Header: >[ Header ] or >> Content
+            NodeKind::Callout
+        }
+        b'@' => {
+            // Element: @card(...) or @memo[ ... ]
+            NodeKind::Element
+        }
+        b'-' | b'*' => {
+            // List: - Item or * Item
+            if bytes.len() > 1 && (bytes[1] == b' ' || bytes[1] == b'\t') {
+                NodeKind::List
+            } else {
+                NodeKind::Text
+            }
+        }
+        b'`' => {
+            // Fenced code block: ```
+            if bytes.starts_with(b"```") {
+                NodeKind::Raw
+            } else {
+                NodeKind::Text
+            }
+        }
+        _ => {
+            // Numbered list item check (e.g. "1. ")
+            if bytes[0].is_ascii_digit() {
+                let mut idx = 1;
+                while idx < bytes.len() && bytes[idx].is_ascii_digit() {
+                    idx += 1;
+                }
+                if idx < bytes.len() && bytes[idx] == b'.' && idx + 1 < bytes.len() && bytes[idx + 1] == b' ' {
+                    return NodeKind::List;
+                }
+            }
+            NodeKind::Text
+        }
+    }
+}
+
+/// Main entry point for CPU parser.
+pub fn parse(input: &str) -> FlatTree {
+    let bytes = input.as_bytes();
+    let line_offsets = scan_line_offsets(bytes);
+    let mut nodes = Vec::with_capacity(line_offsets.len());
+
+    for (idx, &start) in line_offsets.iter().enumerate() {
+        let end = if idx + 1 < line_offsets.len() {
+            line_offsets[idx + 1] as usize
+        } else {
+            bytes.len()
+        };
+        let line_bytes = &bytes[start as usize..end];
+        let node = parse_line(line_bytes, start);
+        nodes.push(node);
+    }
+
+    FlatTree::new(input.to_string(), nodes, line_offsets)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_scan_line_offsets() {
+        let text = "line1\nline2\r\nline3\n";
+        let offsets = scan_line_offsets(text.as_bytes());
+        assert_eq!(offsets, vec![0, 6, 13]);
+    }
+
+    #[test]
+    fn test_parse_line_kinds() {
+        let l1 = parse_line(b"| @card(title:\"test\")\n", 0);
+        assert_eq!(l1.depth, 1);
+        assert_eq!(l1.kind(), NodeKind::Element);
+
+        let l2 = parse_line(b"||>[ Callout ]\n", 0);
+        assert_eq!(l2.depth, 2);
+        assert_eq!(l2.kind(), NodeKind::Callout);
+
+        let l3 = parse_line(b"|||- List item\n", 0);
+        assert_eq!(l3.depth, 3);
+        assert_eq!(l3.kind(), NodeKind::List);
+
+        let l4 = parse_line(b"|=[ Header ]\n", 0);
+        assert_eq!(l4.depth, 1);
+        assert_eq!(l4.kind(), NodeKind::Heading);
+    }
+
+    #[test]
+    fn test_parse_document() {
+        let doc = "|>[ Header ]\n| Is this syntax necessary?\n||>[ Callout ]\n|| Body text.\n";
+        let tree = parse(doc);
+        assert_eq!(tree.nodes.len(), 4);
+        assert_eq!(tree.nodes[0].depth, 1);
+        assert_eq!(tree.nodes[0].kind(), NodeKind::Callout);
+        assert_eq!(tree.nodes[1].depth, 1);
+        assert_eq!(tree.nodes[1].kind(), NodeKind::Text);
+        assert_eq!(tree.nodes[2].depth, 2);
+        assert_eq!(tree.nodes[2].kind(), NodeKind::Callout);
+        assert_eq!(tree.nodes[3].depth, 2);
+        assert_eq!(tree.nodes[3].kind(), NodeKind::Text);
+    }
+}

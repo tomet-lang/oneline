@@ -1,0 +1,20 @@
+[package]
+name = "oneline-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "oneline"
+path = "src/main.rs"
+
+[dependencies]
+oneline-core = { workspace = true }
+oneline-simd = { workspace = true }
+oneline-gpu = { workspace = true }
+oneline-tomet = { workspace = true }
+
+#= Crates.io
+anyhow = { workspace = true }
+clap = { workspace = true }
+mimalloc = { workspace = true }
