@@ -1,0 +1,270 @@
+use anyhow::{Result, anyhow};
+use wgpu::util::DeviceExt;
+
+use crate::util::{check_gpu_len, storage_entry, uniform_entry};
+
+/// Massively parallel GPU parser powered by wgpu Compute Shaders.
+pub struct GpuParser {
+    pub(crate) device: wgpu::Device,
+    pub(crate) queue: wgpu::Queue,
+    pub(crate) limits: wgpu::Limits,
+    adapter_name: String,
+    software: bool,
+
+    // Stage 2/3 pipelines (`shader.wgsl`).
+    pub(crate) parse_pipeline: wgpu::ComputePipeline,
+    /// Query over resident nodes.
+    pub(crate) filter_pipeline: wgpu::ComputePipeline,
+    /// Parse + query in one kernel, no nodes buffer.
+    pub(crate) fused_pipeline: wgpu::ComputePipeline,
+    /// Group 0 with all four bindings (input, offsets, config, nodes).
+    pub(crate) parse_layout: wgpu::BindGroupLayout,
+    /// Group 0 without the nodes binding, for the fused kernel.
+    pub(crate) fused_layout: wgpu::BindGroupLayout,
+    pub(crate) query_layout: wgpu::BindGroupLayout,
+
+    // Stage 1 prefix-scan pipelines (`scan.wgsl`).
+    pub(crate) scan_count_pipeline: wgpu::ComputePipeline,
+    pub(crate) scan_blocks_pipeline: wgpu::ComputePipeline,
+    pub(crate) scan_scatter_pipeline: wgpu::ComputePipeline,
+    pub(crate) scan_layout: wgpu::BindGroupLayout,
+    pub(crate) scatter_layout: wgpu::BindGroupLayout,
+}
+
+fn pipeline(
+    device: &wgpu::Device,
+    label: &str,
+    module: &wgpu::ShaderModule,
+    entry_point: &str,
+    layouts: &[&wgpu::BindGroupLayout],
+) -> wgpu::ComputePipeline {
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some(label),
+        bind_group_layouts: layouts,
+        push_constant_ranges: &[],
+    });
+    device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some(label),
+        layout: Some(&layout),
+        module,
+        entry_point: Some(entry_point),
+        compilation_options: wgpu::PipelineCompilationOptions::default(),
+        cache: None,
+    })
+}
+
+fn bind_layout(
+    device: &wgpu::Device,
+    label: &str,
+    entries: &[wgpu::BindGroupLayoutEntry],
+) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some(label),
+        entries,
+    })
+}
+
+impl GpuParser {
+    /// Initializes GPU device and compute pipelines.
+    pub fn new() -> Result<Self> {
+        pollster::block_on(Self::new_async())
+    }
+
+    pub async fn new_async() -> Result<Self> {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            flags: wgpu::InstanceFlags::default(),
+            backend_options: wgpu::BackendOptions::default(),
+        });
+
+        let adapters = instance.enumerate_adapters(wgpu::Backends::all());
+        let adapter = adapters
+            .into_iter()
+            .find(|a| a.get_info().device_type == wgpu::DeviceType::DiscreteGpu)
+            .or_else(|| instance.enumerate_adapters(wgpu::Backends::all()).into_iter().next())
+            .ok_or_else(|| anyhow!("Failed to find suitable GPU adapter"))?;
+
+        eprintln!(
+            "==> [wgpu] Selected GPU: {} ({:?})",
+            adapter.get_info().name,
+            adapter.get_info().backend
+        );
+
+        let info = adapter.get_info();
+        let (adapter_name, software) = (info.name.clone(), info.device_type == wgpu::DeviceType::Cpu);
+        let limits = adapter.limits();
+        let (device, queue) = adapter
+            .request_device(
+                &wgpu::DeviceDescriptor {
+                    label: Some("Oneline GPU Parser Device"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: limits.clone(),
+                    memory_hints: wgpu::MemoryHints::Performance,
+                },
+                None,
+            )
+            .await?;
+
+        // Stage 2/3: parse + query.
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Oneline Compute Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
+        });
+
+        let parse_layout = bind_layout(
+            &device,
+            "Parse Bind Group Layout",
+            &[
+                storage_entry(0, true),  // input_text
+                storage_entry(1, true),  // line_offsets
+                uniform_entry(2),        // config
+                storage_entry(3, false), // nodes
+            ],
+        );
+        let fused_layout = bind_layout(
+            &device,
+            "Fused Query Bind Group Layout",
+            &[storage_entry(0, true), storage_entry(1, true), uniform_entry(2)],
+        );
+        let query_layout = bind_layout(
+            &device,
+            "Query Bind Group Layout",
+            &[
+                uniform_entry(0),        // query config
+                storage_entry(1, false), // match_count (atomic)
+                storage_entry(2, false), // matched_indices
+            ],
+        );
+
+        let parse_pipeline = pipeline(&device, "Parse", &shader, "parse_lines", &[&parse_layout]);
+        let filter_pipeline = pipeline(
+            &device,
+            "Filter",
+            &shader,
+            "filter_nodes",
+            &[&parse_layout, &query_layout],
+        );
+        let fused_pipeline = pipeline(
+            &device,
+            "Fused Filter",
+            &shader,
+            "filter_fused",
+            &[&fused_layout, &query_layout],
+        );
+
+        // Stage 1: line-offset prefix scan.
+        let scan_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Oneline Scan Compute Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("scan.wgsl").into()),
+        });
+        let scan_layout = bind_layout(
+            &device,
+            "Scan Bind Group Layout 0",
+            &[
+                storage_entry(0, true),  // scan_input
+                uniform_entry(1),        // scan_cfg
+                storage_entry(2, false), // block_counts
+                storage_entry(3, false), // block_offsets
+                storage_entry(4, false), // scan_meta
+            ],
+        );
+        let scatter_layout = bind_layout(&device, "Scatter Bind Group Layout 1", &[storage_entry(0, false)]);
+
+        let scan_count_pipeline =
+            pipeline(&device, "Scan Count", &scan_shader, "count_block_newlines", &[&scan_layout]);
+        let scan_blocks_pipeline =
+            pipeline(&device, "Scan Blocks", &scan_shader, "scan_block_counts", &[&scan_layout]);
+        let scan_scatter_pipeline = pipeline(
+            &device,
+            "Scan Scatter",
+            &scan_shader,
+            "scatter_line_offsets",
+            &[&scan_layout, &scatter_layout],
+        );
+
+        Ok(Self {
+            device,
+            queue,
+            limits,
+            adapter_name,
+            software,
+            parse_pipeline,
+            filter_pipeline,
+            fused_pipeline,
+            parse_layout,
+            fused_layout,
+            query_layout,
+            scan_count_pipeline,
+            scan_blocks_pipeline,
+            scan_scatter_pipeline,
+            scan_layout,
+            scatter_layout,
+        })
+    }
+
+    /// Fails if a single buffer of `bytes` bytes exceeds what this device can bind.
+    pub(crate) fn check_fits(&self, bytes: u64, what: &str) -> Result<()> {
+        let max = self
+            .limits
+            .max_buffer_size
+            .min(u64::from(self.limits.max_storage_buffer_binding_size));
+        if bytes > max {
+            return Err(anyhow!(
+                "{what} needs a {bytes}-byte buffer but this device allows at most {max} bytes"
+            ));
+        }
+        Ok(())
+    }
+
+    /// Uploads the text as a `u32`-packed storage buffer with a single host copy.
+    pub(crate) fn upload_text(&self, input: &str) -> Result<wgpu::Buffer> {
+        let len = input.len();
+        check_gpu_len(len)?;
+        let padded = ((len + 3) & !3).max(4) as u64;
+        self.check_fits(padded, "the input text")?;
+
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Input Text Buffer"),
+            size: padded,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: true,
+        });
+        {
+            // Mapped-at-creation memory is zeroed, which provides the padding bytes.
+            let mut view = buffer.slice(..).get_mapped_range_mut();
+            view[..len].copy_from_slice(input.as_bytes());
+        }
+        buffer.unmap();
+        Ok(buffer)
+    }
+
+    pub(crate) fn upload_u32s(&self, label: &str, data: &[u32]) -> Result<wgpu::Buffer> {
+        self.check_fits(std::mem::size_of_val(data) as u64, label)?;
+        Ok(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(label),
+            contents: bytemuck::cast_slice(data),
+            usage: wgpu::BufferUsages::STORAGE,
+        }))
+    }
+
+    pub(crate) fn uniform<T: bytemuck::Pod>(&self, label: &str, value: &T) -> wgpu::Buffer {
+        self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(label),
+            contents: bytemuck::bytes_of(value),
+            usage: wgpu::BufferUsages::UNIFORM,
+        })
+    }
+}
+
+impl GpuParser {
+    /// Name of the selected adapter.
+    pub fn adapter_name(&self) -> &str {
+        &self.adapter_name
+    }
+
+    /// True for CPU-emulated adapters (e.g. llvmpipe). Their "VRAM" is system
+    /// memory, so timings say nothing about a real GPU.
+    pub fn is_software(&self) -> bool {
+        self.software
+    }
+}

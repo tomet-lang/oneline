@@ -79,22 +79,57 @@ fn count_block_newlines(
     }
 }
 
-// Pass 2: Exclusive prefix scan of block sums
-@compute @workgroup_size(1)
-fn scan_block_counts() {
+// Pass 2: Exclusive prefix scan of block sums.
+//
+// One workgroup. Each of the 256 threads serially sums a contiguous strip of
+// blocks, the 256 strip sums are scanned in shared memory, and each thread then
+// rewrites its strip as exclusive offsets. This replaces the old single-thread
+// loop over every block: serial depth drops from `num_blocks` to
+// `num_blocks / 256 + log2(256)`.
+@compute @workgroup_size(256)
+fn scan_block_counts(@builtin(local_invocation_id) local_id: vec3<u32>) {
     if (scan_cfg.text_len == 0u) {
-        scan_meta[0] = 0u;
+        if (local_id.x == 0u) {
+            scan_meta[0] = 0u;
+        }
         return;
     }
 
-    var running_sum = 0u;
-    for (var i = 0u; i < scan_cfg.num_blocks; i = i + 1u) {
-        block_offsets[i] = running_sum;
-        running_sum = running_sum + block_counts[i];
+    let nb = scan_cfg.num_blocks;
+    let per_thread = (nb + 255u) / 256u;
+    let begin = min(local_id.x * per_thread, nb);
+    let end = min(begin + per_thread, nb);
+
+    var strip_sum = 0u;
+    for (var i = begin; i < end; i = i + 1u) {
+        strip_sum = strip_sum + block_counts[i];
     }
 
-    let total_lines = 1u + running_sum;
-    scan_meta[0] = total_lines;
+    // Inclusive Hillis-Steele scan of the strip sums.
+    wg_shared[local_id.x] = strip_sum;
+    workgroupBarrier();
+    for (var offset = 1u; offset < 256u; offset = offset << 1u) {
+        var v = wg_shared[local_id.x];
+        if (local_id.x >= offset) {
+            v = v + wg_shared[local_id.x - offset];
+        }
+        workgroupBarrier();
+        wg_shared[local_id.x] = v;
+        workgroupBarrier();
+    }
+
+    var running = 0u;
+    if (local_id.x > 0u) {
+        running = wg_shared[local_id.x - 1u];
+    }
+    for (var i = begin; i < end; i = i + 1u) {
+        block_offsets[i] = running;
+        running = running + block_counts[i];
+    }
+
+    if (local_id.x == 255u) {
+        scan_meta[0] = 1u + wg_shared[255];
+    }
 }
 
 // Pass 3: Scatter newline byte offsets into ordered array

@@ -6,9 +6,8 @@ license.workspace = true
 
 [dependencies]
 oneline-core = { workspace = true }
+oneline-simd = { workspace = true }
 tomet-ast = { workspace = true }
 tomet-parser = { workspace = true }
 anyhow = { workspace = true }
-
-[dev-dependencies]
-oneline-simd = { workspace = true }
+rayon = { workspace = true }

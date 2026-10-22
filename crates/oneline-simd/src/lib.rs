@@ -1,409 +1,241 @@
-use oneline_core::{FlatNode, FlatTree, NodeKind};
+//! CPU parser: AVX2 newline scan + per-line classification, optionally multi-core.
+//!
+//! Both entry points use the same two-pass shape that the GPU pipeline uses:
+//!
+//! 1. **count** lines per chunk (a pure newline popcount),
+//! 2. prefix-sum the counts to give every chunk its own output slice, then
+//!    **fill** all chunks in parallel, each writing straight into the final
+//!    `nodes` / `line_offsets` buffers.
+//!
+//! No per-chunk `Vec`s are allocated and nothing is concatenated afterwards, and
+//! the source text is borrowed rather than copied.
+
+mod line;
+mod links;
+mod scan;
+
+use std::mem::MaybeUninit;
+
+use oneline_core::{FlatNode, FlatTree, InputTooLarge, check_input_len};
+
+pub use line::parse_line;
+pub use links::build_links;
+pub use scan::{count_newlines, for_each_newline};
+
+/// Inputs smaller than this are not worth splitting across threads.
+const PAR_THRESHOLD: usize = 256 * 1024;
+/// Smallest chunk handed to a worker.
+const MIN_CHUNK: usize = 128 * 1024;
+/// Chunks per thread, for load balancing.
+const CHUNKS_PER_THREAD: usize = 4;
+
+/// Number of lines a chunk contributes. Chunks start at a line start, so this is
+/// the number of `\n` plus one for an unterminated tail.
+fn lines_in_chunk(chunk: &[u8]) -> usize {
+    match chunk.last() {
+        None => 0,
+        Some(&last) => count_newlines(chunk) + usize::from(last != b'\n'),
+    }
+}
 
 /// Scans line breaks quickly and returns starting byte offsets for each line.
+///
+/// # Panics
+/// If `bytes` is larger than 4 GiB (offsets are `u32`).
 pub fn scan_line_offsets(bytes: &[u8]) -> Vec<u32> {
-    let mut offsets = Vec::with_capacity(bytes.len() / 40 + 1);
-    if bytes.is_empty() {
+    check_input_len(bytes.len()).expect("scan_line_offsets");
+    let count = lines_in_chunk(bytes);
+    let mut offsets = Vec::with_capacity(count);
+    if count == 0 {
         return offsets;
     }
-
-    // Line 1 always starts at offset 0.
     offsets.push(0);
-
-    #[cfg(target_arch = "x86_64")]
-    {
-        if is_x86_feature_detected!("avx2") {
-            unsafe {
-                scan_line_offsets_avx2(bytes, &mut offsets);
-            }
-            return offsets;
+    let len = bytes.len();
+    for_each_newline(bytes, |p| {
+        // A line starts after every newline unless the text ends there.
+        if p + 1 < len {
+            offsets.push((p + 1) as u32);
         }
-    }
-
-    scan_line_offsets_swar(bytes, &mut offsets);
+    });
+    debug_assert_eq!(offsets.len(), count);
     offsets
 }
 
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-unsafe fn scan_line_offsets_avx2(bytes: &[u8], offsets: &mut Vec<u32>) {
-    use std::arch::x86_64::*;
+/// Writes one `(offset, node)` per line of `bytes[start..end]` into the output slices.
+fn fill_chunk(
+    bytes: &[u8],
+    start: usize,
+    end: usize,
+    nodes: &mut [MaybeUninit<FlatNode>],
+    offsets: &mut [MaybeUninit<u32>],
+) {
+    let chunk = &bytes[start..end];
+    let mut k = 0usize;
+    let mut emit = |line_start: usize, line_end: usize| {
+        let abs = (start + line_start) as u32;
+        offsets[k].write(abs);
+        nodes[k].write(parse_line(&chunk[line_start..line_end], abs));
+        k += 1;
+    };
 
-    let len = bytes.len();
-    let mut i = 0;
-    let newline_vec = _mm256_set1_epi8(b'\n' as i8);
-
-    while i + 32 <= len {
-        let chunk = unsafe { _mm256_loadu_si256(bytes.as_ptr().add(i) as *const __m256i) };
-        let cmp = _mm256_cmpeq_epi8(chunk, newline_vec);
-        let mask = _mm256_movemask_epi8(cmp) as u32;
-
-        if mask != 0 {
-            let mut m = mask;
-            while m != 0 {
-                let bit = m.trailing_zeros();
-                let next = (i as u32) + bit + 1;
-                if (next as usize) < len {
-                    offsets.push(next);
-                }
-                m &= m - 1; // Clear lowest set bit
-            }
-        }
-        i += 32;
+    let mut line_start = 0usize;
+    for_each_newline(chunk, |p| {
+        emit(line_start, p + 1);
+        line_start = p + 1;
+    });
+    if line_start < chunk.len() {
+        emit(line_start, chunk.len());
     }
 
-    // Process remaining trailing bytes in scalar mode.
-    while i < len {
-        if bytes[i] == b'\n' {
-            let next = (i + 1) as u32;
-            if (next as usize) < len {
-                offsets.push(next);
-            }
-        }
-        i += 1;
-    }
+    // Safety net for the `set_len` in the caller: every slot must be written.
+    assert_eq!(k, nodes.len(), "chunk line count disagrees with the count pass");
 }
 
-fn scan_line_offsets_swar(bytes: &[u8], offsets: &mut Vec<u32>) {
-    let mut i = 0;
-    let len = bytes.len();
-
-    // 8-byte SWAR (SIMD Within A Register) scan for '\n'.
-    while i + 8 <= len {
-        let chunk = u64::from_ne_bytes(bytes[i..i + 8].try_into().unwrap());
-        let match_mask = chunk ^ 0x0a0a0a0a_0a0a0a0a;
-        let zero_byte_mask = (match_mask.wrapping_sub(0x01010101_01010101)) & (!match_mask) & 0x80808080_80808080;
-
-        if zero_byte_mask != 0 {
-            for b in 0..8 {
-                if bytes[i + b] == b'\n' {
-                    let next = (i + b + 1) as u32;
-                    if (next as usize) < len {
-                        offsets.push(next);
-                    }
-                }
-            }
-        }
-        i += 8;
-    }
-
-    // Process remaining trailing bytes in scalar mode.
-    while i < len {
-        if bytes[i] == b'\n' {
-            let next = (i + 1) as u32;
-            if (next as usize) < len {
-                offsets.push(next);
-            }
-        }
-        i += 1;
-    }
-}
-
-/// Parses a single line byte slice into a FlatNode.
-#[inline]
-pub fn parse_line(line_bytes: &[u8], line_start: u32) -> FlatNode {
-    let len = line_bytes.len();
-    if len == 0 {
-        return FlatNode::new(0, NodeKind::Blank, line_start, 0);
-    }
-
-    // Exclude trailing '\r' and '\n' from effective length.
-    let mut eff_len = len;
-    while eff_len > 0 && (line_bytes[eff_len - 1] == b'\r' || line_bytes[eff_len - 1] == b'\n') {
-        eff_len -= 1;
-    }
-
-    if eff_len == 0 {
-        return FlatNode::new(0, NodeKind::Blank, line_start, 0);
-    }
-
-    // Count consecutive prefix '|' characters (nesting depth).
-    let mut depth = 0;
-    while depth < eff_len && line_bytes[depth] == b'|' {
-        depth += 1;
-    }
-
-    // Skip whitespace immediately following the prefix.
-    let mut content_start = depth;
-    while content_start < eff_len && (line_bytes[content_start] == b' ' || line_bytes[content_start] == b'\t') {
-        content_start += 1;
-    }
-
-    let span_start = line_start + content_start as u32;
-    let span_len = (eff_len - content_start) as u32;
-
-    if span_len == 0 {
-        return FlatNode::new(depth as u32, NodeKind::Blank, span_start, 0);
-    }
-
-    let rest = &line_bytes[content_start..eff_len];
-    let kind = classify_line(rest);
-
-    FlatNode::new(depth as u32, kind, span_start, span_len)
-}
-
-/// Classifies syntax kind from leading line tokens (tomet / oneline compatible).
-#[inline]
-fn classify_line(bytes: &[u8]) -> NodeKind {
-    if bytes.is_empty() {
-        return NodeKind::Blank;
-    }
-
-    match bytes[0] {
-        b'=' => {
-            // Heading: =[ Header ] or ==[ Subheader ]
-            NodeKind::Heading
-        }
-        b'>' => {
-            // Callout or Header: >[ Header ] or >> Content
-            NodeKind::Callout
-        }
-        b'@' => {
-            // Element: @card(...) or @memo[ ... ]
-            NodeKind::Element
-        }
-        b'-' | b'*' => {
-            // List: - Item or * Item
-            if bytes.len() > 1 && (bytes[1] == b' ' || bytes[1] == b'\t') {
-                NodeKind::List
-            } else {
-                NodeKind::Text
-            }
-        }
-        b'`' => {
-            // Fenced code block: ```
-            if bytes.starts_with(b"```") {
-                NodeKind::Raw
-            } else {
-                NodeKind::Text
-            }
-        }
-        _ => {
-            // Numbered list item check (e.g. "1. ")
-            if bytes[0].is_ascii_digit() {
-                let mut idx = 1;
-                while idx < bytes.len() && bytes[idx].is_ascii_digit() {
-                    idx += 1;
-                }
-                if idx < bytes.len() && bytes[idx] == b'.' && idx + 1 < bytes.len() && bytes[idx + 1] == b' ' {
-                    return NodeKind::List;
-                }
-            }
-            NodeKind::Text
-        }
-    }
-}
-
-/// Main entry point for single-threaded CPU parser.
-pub fn parse(input: &str) -> FlatTree {
-    let bytes = input.as_bytes();
-    let line_offsets = scan_line_offsets(bytes);
-    let mut nodes = Vec::with_capacity(line_offsets.len());
-
-    for (idx, &start) in line_offsets.iter().enumerate() {
-        let end = if idx + 1 < line_offsets.len() {
-            line_offsets[idx + 1] as usize
-        } else {
-            bytes.len()
-        };
-        let line_bytes = &bytes[start as usize..end];
-        let node = parse_line(line_bytes, start);
-        nodes.push(node);
-    }
-
-    FlatTree::new(input.to_string(), nodes, line_offsets)
-}
-
-/// Multi-threaded CPU parser powered by Rayon and AVX2 SIMD.
-pub fn parse_par(input: &str) -> FlatTree {
-    let bytes = input.as_bytes();
-    let len = bytes.len();
-    if len == 0 {
-        return FlatTree::new(input.to_string(), Vec::new(), Vec::new());
-    }
-
-    let num_threads = rayon::current_num_threads();
-    if num_threads <= 1 || len < 64 * 1024 {
-        return parse(input);
-    }
-
-    use rayon::prelude::*;
-
-    let chunks = partition_chunks(bytes, num_threads);
-    let chunks_data: Vec<(Vec<FlatNode>, Vec<u32>)> = chunks
-        .into_par_iter()
-        .map(|(start, end)| scan_and_parse_chunk(bytes, start, end))
-        .collect();
-
-    let total_lines: usize = chunks_data.iter().map(|(n, _)| n.len()).sum();
-    let mut all_nodes = Vec::with_capacity(total_lines);
-    let mut all_offsets = Vec::with_capacity(total_lines);
-
-    for (nodes, offsets) in chunks_data {
-        all_nodes.extend(nodes);
-        all_offsets.extend(offsets);
-    }
-
-    FlatTree::new(input.to_string(), all_nodes, all_offsets)
-}
-
-fn partition_chunks(bytes: &[u8], target_chunks: usize) -> Vec<(usize, usize)> {
+/// Splits `bytes` into at most `target` chunks whose boundaries are line starts.
+fn partition_chunks(bytes: &[u8], target: usize) -> Vec<(usize, usize)> {
     let len = bytes.len();
     if len == 0 {
         return Vec::new();
     }
-    if target_chunks <= 1 || len < 32 * 1024 {
-        return vec![(0, len)];
-    }
+    let target = target.min(len / MIN_CHUNK).max(1);
+    let approx = len / target;
 
-    let approx_chunk_size = len / target_chunks;
-    if approx_chunk_size < 16 * 1024 {
-        return vec![(0, len)];
-    }
-
-    let mut boundaries = Vec::with_capacity(target_chunks + 1);
-    boundaries.push(0);
-
-    for k in 1..target_chunks {
-        let naive = k * approx_chunk_size;
-        let mut pos = naive;
-        while pos < len && bytes[pos] != b'\n' {
-            pos += 1;
+    let mut bounds = vec![0usize];
+    for k in 1..target {
+        let mut pos = k * approx;
+        // Move to the start of the next line.
+        match bytes[pos..].iter().position(|&b| b == b'\n') {
+            Some(i) => pos += i + 1,
+            None => break,
         }
-        if pos < len {
-            pos += 1; // Start of next line
-        }
-        if pos < len && pos > *boundaries.last().unwrap() {
-            boundaries.push(pos);
+        if pos < len && pos > *bounds.last().unwrap() {
+            bounds.push(pos);
         }
     }
-
-    boundaries.push(len);
-    boundaries.dedup();
-
-    let mut chunks = Vec::with_capacity(boundaries.len() - 1);
-    for i in 0..boundaries.len() - 1 {
-        chunks.push((boundaries[i], boundaries[i + 1]));
-    }
-    chunks
+    bounds.push(len);
+    bounds.windows(2).map(|w| (w[0], w[1])).collect()
 }
 
-fn scan_and_parse_chunk(bytes: &[u8], chunk_start: usize, chunk_end: usize) -> (Vec<FlatNode>, Vec<u32>) {
-    let chunk_bytes = &bytes[chunk_start..chunk_end];
-    let chunk_len = chunk_bytes.len();
-    if chunk_len == 0 {
-        return (Vec::new(), Vec::new());
+fn build<'a>(input: &'a str, chunks: &[(usize, usize)], parallel: bool) -> FlatTree<'a> {
+    let bytes = input.as_bytes();
+
+    // Pass 1: count lines per chunk.
+    let counts: Vec<usize> = if parallel {
+        use rayon::prelude::*;
+        chunks.par_iter().map(|&(s, e)| lines_in_chunk(&bytes[s..e])).collect()
+    } else {
+        chunks.iter().map(|&(s, e)| lines_in_chunk(&bytes[s..e])).collect()
+    };
+    let total: usize = counts.iter().sum();
+
+    let mut nodes: Vec<FlatNode> = Vec::with_capacity(total);
+    let mut offsets: Vec<u32> = Vec::with_capacity(total);
+
+    // Hand every chunk its own disjoint output window.
+    let mut n_rest = nodes.spare_capacity_mut();
+    let mut o_rest = offsets.spare_capacity_mut();
+    let mut jobs = Vec::with_capacity(chunks.len());
+    for (&(s, e), &c) in chunks.iter().zip(&counts) {
+        let (n_head, n_tail) = n_rest.split_at_mut(c);
+        let (o_head, o_tail) = o_rest.split_at_mut(c);
+        jobs.push((s, e, n_head, o_head));
+        n_rest = n_tail;
+        o_rest = o_tail;
     }
 
-    let mut offsets = Vec::with_capacity(chunk_len / 40 + 1);
-    offsets.push(chunk_start as u32);
-
-    scan_chunk_newlines(chunk_bytes, chunk_start as u32, &mut offsets);
-
-    let mut nodes = Vec::with_capacity(offsets.len());
-    for (idx, &line_start) in offsets.iter().enumerate() {
-        let line_end = if idx + 1 < offsets.len() {
-            offsets[idx + 1] as usize
-        } else {
-            chunk_end
-        };
-        let line_bytes = &bytes[line_start as usize..line_end];
-        let node = parse_line(line_bytes, line_start);
-        nodes.push(node);
+    // Pass 2: fill.
+    if parallel {
+        use rayon::prelude::*;
+        jobs.into_par_iter().for_each(|(s, e, n, o)| fill_chunk(bytes, s, e, n, o));
+    } else {
+        for (s, e, n, o) in jobs {
+            fill_chunk(bytes, s, e, n, o);
+        }
     }
 
-    (nodes, offsets)
+    // SAFETY: `fill_chunk` asserted that it wrote exactly `counts[i]` slots of each
+    // window, and the windows tile `0..total` without overlap.
+    unsafe {
+        nodes.set_len(total);
+        offsets.set_len(total);
+    }
+    FlatTree::new(input, nodes, offsets)
 }
 
-#[inline]
-fn scan_chunk_newlines(chunk: &[u8], base: u32, offsets: &mut Vec<u32>) {
-    #[cfg(target_arch = "x86_64")]
-    {
-        if is_x86_feature_detected!("avx2") {
-            unsafe {
-                scan_chunk_newlines_avx2(chunk, base, offsets);
-            }
-            return;
-        }
+/// Single-threaded parser.
+pub fn try_parse(input: &str) -> Result<FlatTree<'_>, InputTooLarge> {
+    check_input_len(input.len())?;
+    if input.is_empty() {
+        return Ok(FlatTree::new(input, Vec::new(), Vec::new()));
     }
-    scan_chunk_newlines_swar(chunk, base, offsets);
+    Ok(build(input, &[(0, input.len())], false))
 }
 
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-unsafe fn scan_chunk_newlines_avx2(chunk: &[u8], base: u32, offsets: &mut Vec<u32>) {
-    use std::arch::x86_64::*;
-
-    let len = chunk.len();
-    let mut i = 0;
-    let newline_vec = _mm256_set1_epi8(b'\n' as i8);
-
-    while i + 32 <= len {
-        let c = unsafe { _mm256_loadu_si256(chunk.as_ptr().add(i) as *const __m256i) };
-        let cmp = _mm256_cmpeq_epi8(c, newline_vec);
-        let mask = _mm256_movemask_epi8(cmp) as u32;
-
-        if mask != 0 {
-            let mut m = mask;
-            while m != 0 {
-                let bit = m.trailing_zeros();
-                let next = (i as u32) + bit + 1;
-                if (next as usize) < len {
-                    offsets.push(base + next);
-                }
-                m &= m - 1;
-            }
-        }
-        i += 32;
+/// Multi-threaded parser (Rayon + AVX2). Falls back to [`try_parse`] for small inputs.
+pub fn try_parse_par(input: &str) -> Result<FlatTree<'_>, InputTooLarge> {
+    check_input_len(input.len())?;
+    let threads = rayon::current_num_threads();
+    if threads <= 1 || input.len() < PAR_THRESHOLD {
+        return try_parse(input);
     }
-
-    while i < len {
-        if chunk[i] == b'\n' {
-            let next = (i + 1) as u32;
-            if (next as usize) < len {
-                offsets.push(base + next);
-            }
-        }
-        i += 1;
-    }
+    let chunks = partition_chunks(input.as_bytes(), threads * CHUNKS_PER_THREAD);
+    Ok(build(input, &chunks, chunks.len() > 1))
 }
 
-fn scan_chunk_newlines_swar(chunk: &[u8], base: u32, offsets: &mut Vec<u32>) {
-    let mut i = 0;
-    let len = chunk.len();
+/// Main entry point for the single-threaded CPU parser.
+///
+/// # Panics
+/// If `input` is larger than 4 GiB; use [`try_parse`] to handle that.
+pub fn parse(input: &str) -> FlatTree<'_> {
+    try_parse(input).expect("oneline_simd::parse")
+}
 
-    while i + 8 <= len {
-        let chunk_u64 = u64::from_ne_bytes(chunk[i..i + 8].try_into().unwrap());
-        let match_mask = chunk_u64 ^ 0x0a0a0a0a_0a0a0a0a;
-        let zero_byte_mask = (match_mask.wrapping_sub(0x01010101_01010101)) & (!match_mask) & 0x80808080_80808080;
-
-        if zero_byte_mask != 0 {
-            for b in 0..8 {
-                if chunk[i + b] == b'\n' {
-                    let next = (i + b + 1) as u32;
-                    if (next as usize) < len {
-                        offsets.push(base + next);
-                    }
-                }
-            }
-        }
-        i += 8;
-    }
-
-    while i < len {
-        if chunk[i] == b'\n' {
-            let next = (i + 1) as u32;
-            if (next as usize) < len {
-                offsets.push(base + next);
-            }
-        }
-        i += 1;
-    }
+/// Main entry point for the multi-threaded CPU parser.
+///
+/// # Panics
+/// If `input` is larger than 4 GiB; use [`try_parse_par`] to handle that.
+pub fn parse_par(input: &str) -> FlatTree<'_> {
+    try_parse_par(input).expect("oneline_simd::parse_par")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use oneline_core::NodeKind;
+    use oneline_core::datagen::{self, Profile};
+
+    /// Obviously-correct reference: split on `\n`, parse each piece.
+    fn reference(input: &str) -> (Vec<u32>, Vec<FlatNode>) {
+        let bytes = input.as_bytes();
+        let mut starts = Vec::new();
+        if !bytes.is_empty() {
+            starts.push(0usize);
+            for (i, &b) in bytes.iter().enumerate() {
+                if b == b'\n' && i + 1 < bytes.len() {
+                    starts.push(i + 1);
+                }
+            }
+        }
+        let nodes = starts
+            .iter()
+            .enumerate()
+            .map(|(k, &s)| {
+                let e = starts.get(k + 1).copied().unwrap_or(bytes.len());
+                parse_line(&bytes[s..e], s as u32)
+            })
+            .collect();
+        (starts.into_iter().map(|s| s as u32).collect(), nodes)
+    }
+
+    fn assert_matches_reference(input: &str) {
+        let (offs, nodes) = reference(input);
+        assert_eq!(scan_line_offsets(input.as_bytes()), offs, "scan_line_offsets");
+        for (name, tree) in [("parse", parse(input)), ("parse_par", parse_par(input))] {
+            assert_eq!(tree.line_offsets, offs, "{name}: offsets");
+            assert_eq!(tree.nodes, nodes, "{name}: nodes");
+            assert_eq!(tree.source, input);
+        }
+    }
 
     #[test]
     fn test_scan_line_offsets() {
@@ -447,24 +279,62 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_par_matches_sequential() {
-        let sample = "|>[ Header ]\n| Paragraph line\n||>[ Nested Callout ]\n|| Body content\n|||- List 1\n|||- List 2\n";
-        let mut text = String::with_capacity(sample.len() * 2000);
-        for _ in 0..2000 {
-            text.push_str(sample);
+    fn edge_cases() {
+        for case in [
+            "",
+            "\n",
+            "\n\n\n",
+            "x",
+            "x\n",
+            "x\ny",
+            "\r\n",
+            "a\r\nb\r\n",
+            "|\n",
+            "||||\n|||| \n",
+            "   \n\t\n",
+            "| 日本語\n|| ｗｉｄｅ\n",
+            "```\n- not a list\n```\n",
+            "no trailing newline",
+        ] {
+            assert_matches_reference(case);
         }
+        // Lines longer than any chunk/SIMD width, and one giant unterminated line.
+        assert_matches_reference(&format!("{}\n|{}", "a".repeat(100_000), "b".repeat(300_000)));
+        assert_matches_reference(&"|".repeat(1_000_000));
+    }
 
-        let seq_tree = parse(&text);
-        let par_tree = parse_par(&text);
-
-        assert_eq!(par_tree.line_offsets.len(), seq_tree.line_offsets.len());
-        assert_eq!(par_tree.line_offsets, seq_tree.line_offsets);
-        assert_eq!(par_tree.nodes.len(), seq_tree.nodes.len());
-        for (i, (p_node, s_node)) in par_tree.nodes.iter().zip(seq_tree.nodes.iter()).enumerate() {
-            assert_eq!(p_node.depth, s_node.depth, "depth mismatch at line {}", i);
-            assert_eq!(p_node.kind(), s_node.kind(), "kind mismatch at line {}", i);
-            assert_eq!(p_node.span_start, s_node.span_start, "span_start mismatch at line {}", i);
-            assert_eq!(p_node.span_len, s_node.span_len, "span_len mismatch at line {}", i);
+    #[test]
+    fn all_profiles_match_reference_across_chunking() {
+        // Big enough that parse_par really splits (> PAR_THRESHOLD, several chunks).
+        for p in Profile::ALL {
+            for seed in 0..3 {
+                let text = datagen::generate(p, 2 * 1024 * 1024, seed);
+                assert_matches_reference(&text);
+            }
         }
+    }
+
+    #[test]
+    fn chunk_boundaries_are_line_starts() {
+        let text = datagen::generate(Profile::Mixed, 3 * 1024 * 1024, 99);
+        let bytes = text.as_bytes();
+        let chunks = partition_chunks(bytes, 64);
+        assert!(chunks.len() > 1);
+        assert_eq!(chunks[0].0, 0);
+        assert_eq!(chunks.last().unwrap().1, bytes.len());
+        for w in chunks.windows(2) {
+            assert_eq!(w[0].1, w[1].0, "chunks must tile the input");
+            assert_eq!(bytes[w[0].1 - 1], b'\n', "boundary must follow a newline");
+        }
+    }
+
+    #[test]
+    fn rejects_inputs_over_4gib_without_allocating() {
+        use oneline_core::{InputTooLarge, MAX_INPUT_LEN, check_input_len};
+        assert_eq!(check_input_len(MAX_INPUT_LEN), Ok(()));
+        assert_eq!(
+            check_input_len(MAX_INPUT_LEN + 1),
+            Err(InputTooLarge { len: MAX_INPUT_LEN + 1 })
+        );
     }
 }

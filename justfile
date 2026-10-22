@@ -28,3 +28,7 @@ query file *args:
 
 query-bench mb="50" *args:
     cargo run --release --bin oneline -- query --bench-mb {{ mb }} {{ args }}
+
+# Statistically rigorous benchmarks (criterion). Pass a bench name to run one: `just bench-criterion parse_simd`
+bench-criterion *args:
+    cargo bench -p oneline-benches {{ args }}

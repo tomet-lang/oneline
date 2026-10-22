@@ -1,5 +1,40 @@
 use bytemuck::{Pod, Zeroable};
 
+pub mod datagen;
+mod links;
+
+pub use links::{NONE, TreeLinks};
+
+/// Largest input (in bytes) the `u32` offsets of [`FlatNode`] can address.
+pub const MAX_INPUT_LEN: usize = u32::MAX as usize;
+
+/// Input does not fit the 32-bit offsets used by [`FlatNode`] / the GPU buffers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InputTooLarge {
+    pub len: usize,
+}
+
+impl std::fmt::Display for InputTooLarge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "input is {} bytes but 32-bit offsets address at most {} bytes",
+            self.len, MAX_INPUT_LEN
+        )
+    }
+}
+
+impl std::error::Error for InputTooLarge {}
+
+/// Fails when `len` cannot be addressed by `u32` offsets.
+pub const fn check_input_len(len: usize) -> Result<(), InputTooLarge> {
+    if len > MAX_INPUT_LEN {
+        Err(InputTooLarge { len })
+    } else {
+        Ok(())
+    }
+}
+
 /// Node kind identifiers synchronized with GPU Compute Shader definitions.
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -73,18 +108,20 @@ impl FlatNode {
 }
 
 /// Flat tree holding parse results in a Structure of Arrays (SoA) layout.
+///
+/// The source text is borrowed, not copied: parsing never duplicates the input.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FlatTree {
+pub struct FlatTree<'a> {
     /// Original source text.
-    pub source: String,
+    pub source: &'a str,
     /// Array of flat nodes corresponding to each line.
     pub nodes: Vec<FlatNode>,
     /// Array of byte offsets pointing to the start of each line.
     pub line_offsets: Vec<u32>,
 }
 
-impl FlatTree {
-    pub fn new(source: String, nodes: Vec<FlatNode>, line_offsets: Vec<u32>) -> Self {
+impl<'a> FlatTree<'a> {
+    pub fn new(source: &'a str, nodes: Vec<FlatNode>, line_offsets: Vec<u32>) -> Self {
         Self {
             source,
             nodes,
@@ -93,14 +130,10 @@ impl FlatTree {
     }
 
     /// Retrieve the text slice pointed to by the node.
-    pub fn content_of(&self, node: &FlatNode) -> &str {
+    pub fn content_of(&self, node: &FlatNode) -> &'a str {
         let start = node.span_start as usize;
         let end = start + node.span_len as usize;
-        if start <= self.source.len() && end <= self.source.len() {
-            &self.source[start..end]
-        } else {
-            ""
-        }
+        self.source.get(start..end).unwrap_or("")
     }
 
     /// Dump human-readable indented tree representation.
