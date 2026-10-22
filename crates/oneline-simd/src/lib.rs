@@ -10,18 +10,71 @@ pub fn scan_line_offsets(bytes: &[u8]) -> Vec<u32> {
     // Line 1 always starts at offset 0.
     offsets.push(0);
 
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") {
+            unsafe {
+                scan_line_offsets_avx2(bytes, &mut offsets);
+            }
+            return offsets;
+        }
+    }
+
+    scan_line_offsets_swar(bytes, &mut offsets);
+    offsets
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn scan_line_offsets_avx2(bytes: &[u8], offsets: &mut Vec<u32>) {
+    use std::arch::x86_64::*;
+
+    let len = bytes.len();
+    let mut i = 0;
+    let newline_vec = _mm256_set1_epi8(b'\n' as i8);
+
+    while i + 32 <= len {
+        let chunk = unsafe { _mm256_loadu_si256(bytes.as_ptr().add(i) as *const __m256i) };
+        let cmp = _mm256_cmpeq_epi8(chunk, newline_vec);
+        let mask = _mm256_movemask_epi8(cmp) as u32;
+
+        if mask != 0 {
+            let mut m = mask;
+            while m != 0 {
+                let bit = m.trailing_zeros();
+                let next = (i as u32) + bit + 1;
+                if (next as usize) < len {
+                    offsets.push(next);
+                }
+                m &= m - 1; // Clear lowest set bit
+            }
+        }
+        i += 32;
+    }
+
+    // Process remaining trailing bytes in scalar mode.
+    while i < len {
+        if bytes[i] == b'\n' {
+            let next = (i + 1) as u32;
+            if (next as usize) < len {
+                offsets.push(next);
+            }
+        }
+        i += 1;
+    }
+}
+
+fn scan_line_offsets_swar(bytes: &[u8], offsets: &mut Vec<u32>) {
     let mut i = 0;
     let len = bytes.len();
 
     // 8-byte SWAR (SIMD Within A Register) scan for '\n'.
     while i + 8 <= len {
         let chunk = u64::from_ne_bytes(bytes[i..i + 8].try_into().unwrap());
-        // Detect match with 0x0a ('\n') using bitwise operations.
         let match_mask = chunk ^ 0x0a0a0a0a_0a0a0a0a;
         let zero_byte_mask = (match_mask.wrapping_sub(0x01010101_01010101)) & (!match_mask) & 0x80808080_80808080;
 
         if zero_byte_mask != 0 {
-            // Byte matches detected; check scalar offsets.
             for b in 0..8 {
                 if bytes[i + b] == b'\n' {
                     let next = (i + b + 1) as u32;
@@ -44,8 +97,6 @@ pub fn scan_line_offsets(bytes: &[u8]) -> Vec<u32> {
         }
         i += 1;
     }
-
-    offsets
 }
 
 /// Parses a single line byte slice into a FlatNode.

@@ -110,3 +110,39 @@ fn parse_lines(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     nodes[tid] = FlatNode(depth, kind, span_start, span_len);
 }
+
+struct QueryConfig {
+    target_kind: u32,
+    target_depth: u32,
+    max_matches: u32,
+    _pad: u32,
+};
+
+@group(1) @binding(0) var<uniform> query: QueryConfig;
+@group(1) @binding(1) var<storage, read_write> match_count: atomic<u32>;
+@group(1) @binding(2) var<storage, read_write> matched_indices: array<u32>;
+
+@compute @workgroup_size(64)
+fn filter_nodes(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let tid = global_id.y * 65535u * 64u + global_id.x;
+    if (tid >= config.line_count) {
+        return;
+    }
+
+    let node = nodes[tid];
+    var is_match = true;
+
+    if (query.target_kind != 0u && node.kind != query.target_kind) {
+        is_match = false;
+    }
+    if (query.target_depth != 0xFFFFFFFFu && node.depth != query.target_depth) {
+        is_match = false;
+    }
+
+    if (is_match) {
+        let slot = atomicAdd(&match_count, 1u);
+        if (slot < query.max_matches) {
+            matched_indices[slot] = tid;
+        }
+    }
+}

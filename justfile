@@ -22,3 +22,9 @@ bench-mb mb="50" iter="5":
 
 parse file engine="simd" *args:
     cargo run --bin oneline -- parse {{ file }} --engine {{ engine }} {{ args }}
+
+query file *args:
+    cargo run --bin oneline -- query {{ file }} {{ args }}
+
+query-bench mb="50" *args:
+    cargo run --release --bin oneline -- query --bench-mb {{ mb }} {{ args }}
