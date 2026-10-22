@@ -28,9 +28,10 @@ tomet-ast = { path = "../tomet/crates/tomet-syntax-ast" }
 tomet-parser = { path = "../tomet/crates/tomet-syntax-parser" }
 
 #= GPU & Parallelism
-wgpu = "24"
-pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
+rayon = "1.10"
+pollster = "0.4"
+wgpu = "24"
 
 #= Crates.io
 anyhow = "1"

@@ -65,6 +65,7 @@ enum Commands {
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 enum Engine {
     Simd,
+    SimdPar,
     Gpu,
 }
 
@@ -94,6 +95,7 @@ fn main() -> Result<()> {
 
             let tree = match engine {
                 Engine::Simd => oneline_simd::parse(&content),
+                Engine::SimdPar => oneline_simd::parse_par(&content),
                 Engine::Gpu => {
                     let parser = oneline_gpu::GpuParser::new()
                         .context("Failed to initialize GPU parser")?;
@@ -139,7 +141,7 @@ fn main() -> Result<()> {
 
             println!("==> Benchmarking {} ({:.2} MB, {} iterations)\n", name, mb_size, iterations);
 
-            // 1. CPU SIMD Benchmark
+            // 1. CPU SIMD Benchmark (Single-core)
             {
                 let start = Instant::now();
                 for _ in 0..iterations {
@@ -148,7 +150,24 @@ fn main() -> Result<()> {
                 let elapsed = start.elapsed();
                 let avg_time = elapsed / iterations as u32;
                 let throughput_gbps = (total_bytes / 1_000_000_000.0) / avg_time.as_secs_f64();
-                println!("  [CPU SIMD]");
+                println!("  [CPU SIMD (Single-core AVX2)]");
+                println!("    Average Latency: {:?}", avg_time);
+                println!("    Throughput:      {:.2} GB/s", throughput_gbps);
+            }
+
+            // 2. CPU SIMD Benchmark (Multi-core Rayon)
+            {
+                // Warmup
+                let _ = oneline_simd::parse_par(&content);
+
+                let start = Instant::now();
+                for _ in 0..iterations {
+                    let _ = oneline_simd::parse_par(&content);
+                }
+                let elapsed = start.elapsed();
+                let avg_time = elapsed / iterations as u32;
+                let throughput_gbps = (total_bytes / 1_000_000_000.0) / avg_time.as_secs_f64();
+                println!("\n  [CPU SIMD (Multi-core Rayon + AVX2, {} threads)]", rayon::current_num_threads());
                 println!("    Average Latency: {:?}", avg_time);
                 println!("    Throughput:      {:.2} GB/s", throughput_gbps);
             }
