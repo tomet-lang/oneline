@@ -5,9 +5,11 @@
 //!
 //! * `cold/*`   — raw text in, matching line indices out
 //! * `warm/*`   — document already parsed and resident, many queries in a row
+//!
+//! `search` repeats the cold/warm split for substring search.
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use oneline_core::datagen::Profile;
+use oneline_core::datagen::{self, Profile};
 use oneline_core::{FlatNode, NodeKind};
 use rayon::prelude::*;
 
@@ -61,5 +63,60 @@ fn cold_and_warm(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, cold_and_warm);
+
+/// Substring search on `prose`, with patterns of very different selectivity taken from
+/// the generator's vocabulary. Same question both ways: every occurrence offset, or just
+/// the count.
+///
+/// * `compare/search-cold/*` — text only in host memory: upload + search vs CPU memmem
+/// * `compare/search-warm/*` — text already in RAM (CPU) / resident in VRAM (GPU)
+fn search(c: &mut Criterion) {
+    let gpu = gpu();
+    let vocab = datagen::prose_vocabulary();
+    // rare word (~1k hits / 100 MB) and the most frequent word (~835k hits / 100 MB)
+    let patterns = [("rare", vocab[3500].clone()), ("frequent", vocab[0].clone())];
+
+    for size in [16 * MB, 128 * MB] {
+        let text = dataset(Profile::Prose, size);
+        let doc = gpu.as_ref().map(|p| p.upload(&text).unwrap());
+        let id = size_label(size);
+        for (name, pattern) in &patterns {
+            let p = pattern.as_bytes();
+
+            let mut cold = c.benchmark_group(format!("compare/search-cold/{name}"));
+            configure(&mut cold, size);
+            cold.throughput(Throughput::Bytes(text.len() as u64));
+            cold.bench_function(BenchmarkId::new("cpu_memmem_par", &id), |b| {
+                b.iter(|| oneline_simd::find_all_par(text.as_bytes(), p))
+            });
+            if let Some(g) = &gpu {
+                cold.bench_function(BenchmarkId::new("gpu_one_shot", &id), |b| {
+                    b.iter(|| g.search_raw(&text, p, 1 << 20).unwrap())
+                });
+            }
+            cold.finish();
+
+            let mut warm = c.benchmark_group(format!("compare/search-warm/{name}"));
+            configure(&mut warm, size);
+            warm.throughput(Throughput::Bytes(text.len() as u64));
+            warm.bench_function(BenchmarkId::new("cpu_offsets", &id), |b| {
+                b.iter(|| oneline_simd::find_all_par(text.as_bytes(), p))
+            });
+            warm.bench_function(BenchmarkId::new("cpu_count", &id), |b| {
+                b.iter(|| oneline_simd::count_all_par(text.as_bytes(), p))
+            });
+            if let (Some(g), Some(d)) = (&gpu, &doc) {
+                warm.bench_function(BenchmarkId::new("gpu_offsets", &id), |b| {
+                    b.iter(|| g.search_document(d, p, 1 << 20).unwrap())
+                });
+                warm.bench_function(BenchmarkId::new("gpu_count", &id), |b| {
+                    b.iter(|| g.search_document(d, p, 0).unwrap())
+                });
+            }
+            warm.finish();
+        }
+    }
+}
+
+criterion_group!(benches, cold_and_warm, search);
 criterion_main!(benches);

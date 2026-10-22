@@ -179,3 +179,132 @@ fn oversized_input_is_an_error_not_corruption() {
     assert!(check_gpu_len(usize::MAX).is_err());
 }
 
+
+// ---- substring search -------------------------------------------------------
+
+use crate::MAX_PATTERN_LEN;
+
+/// Search results must equal the CPU reference exactly, through both the resident
+/// and the one-shot path.
+fn assert_search_matches_cpu(parser: &GpuParser, text: &str, pattern: &[u8]) {
+    let want = oneline_simd::find_all(text.as_bytes(), pattern);
+    let cap = want.len().max(1);
+    let doc = parser.upload(text).unwrap();
+    let resident = parser.search_document(&doc, pattern, cap).unwrap();
+    assert_eq!(resident.total_matches as usize, want.len(), "resident count for {pattern:?}");
+    assert_eq!(resident.offsets, want, "resident offsets for {pattern:?}");
+    let one_shot = parser.search_raw(text, pattern, cap).unwrap();
+    assert_eq!(one_shot.offsets, want, "one-shot offsets for {pattern:?}");
+}
+
+#[test]
+fn search_matches_cpu_on_generated_documents() {
+    let parser = gpu!();
+    for profile in Profile::ALL {
+        let text = datagen::generate(profile, 3 << 20, 17);
+        let bytes = text.as_bytes();
+        let mut patterns: Vec<Vec<u8>> = ["lorem", "SIMD GPU", "naïve", "|", "||", "\n|", "階層 解析", "- ", "zzzz-absent"]
+            .iter()
+            .map(|s| s.as_bytes().to_vec())
+            .collect();
+        // Slices of the text itself, from 1 byte up to the 64-byte maximum.
+        for (i, len) in [1usize, 2, 3, 5, 8, 17, 33, 63, 64].into_iter().enumerate() {
+            let at = 1000 + i * 99_991;
+            patterns.push(bytes[at..at + len].to_vec());
+        }
+        for p in patterns {
+            assert_search_matches_cpu(&parser, &text, &p);
+        }
+    }
+}
+
+#[test]
+fn search_handles_alignment_overlap_and_tail() {
+    let parser = gpu!();
+    // The needle at every alignment relative to the 4-byte words the kernel owns.
+    for shift in 0..8 {
+        let text = format!("{}needle{}needle", "x".repeat(shift), "y".repeat(shift));
+        assert_search_matches_cpu(&parser, &text, b"needle");
+    }
+    assert_search_matches_cpu(&parser, "aaaaaaaa", b"aa"); // overlapping occurrences
+    assert_search_matches_cpu(&parser, "abc", b"abc"); // whole text
+    assert_search_matches_cpu(&parser, "xxabc", b"abc"); // flush with the end
+    assert_search_matches_cpu(&parser, "ab", b"abc"); // text shorter than pattern
+    assert_search_matches_cpu(&parser, "a\nb\na\nb", b"a\nb"); // pattern spans a newline
+    // The buffer is zero-padded to a word boundary; a pattern ending in NUL must not
+    // "match" the padding.
+    assert_search_matches_cpu(&parser, "xa", b"a\0");
+    assert_search_matches_cpu(&parser, "xa\0", b"a\0");
+}
+
+#[test]
+fn search_rejects_bad_patterns() {
+    let parser = gpu!();
+    let doc = parser.upload("abc").unwrap();
+    assert!(parser.search_document(&doc, b"", 8).is_err());
+    assert!(parser.search_document(&doc, &[b'a'; MAX_PATTERN_LEN + 1], 8).is_err());
+    assert!(parser.search_document(&doc, &[b'a'; MAX_PATTERN_LEN], 8).is_ok());
+    assert!(parser.search_raw("abc", b"", 8).is_err());
+    // An error must not poison later calls (the scratch is dropped and rebuilt).
+    assert_eq!(parser.search_document(&doc, b"b", 8).unwrap().offsets, vec![1]);
+}
+
+#[test]
+fn search_truncation_reports_true_total() {
+    let parser = gpu!();
+    let text = datagen::generate(Profile::Mixed, 2 << 20, 2);
+    let want = oneline_simd::find_all(text.as_bytes(), b"|");
+    assert!(want.len() > 10_000, "need a dense pattern to stress the workgroup reservation");
+
+    let doc = parser.upload(&text).unwrap();
+    let r = parser.search_document(&doc, b"|", 100).unwrap();
+    assert_eq!(r.total_matches as usize, want.len());
+    assert_eq!(r.offsets.len(), 100);
+    assert!(r.offsets.iter().all(|o| want.binary_search(o).is_ok()), "subset of true matches");
+
+    let none = parser.search_document(&doc, b"|", 0).unwrap();
+    assert_eq!(none.total_matches as usize, want.len());
+    assert!(none.offsets.is_empty());
+}
+
+#[test]
+fn search_on_empty_document() {
+    let parser = gpu!();
+    let doc = parser.upload("").unwrap();
+    assert_eq!(parser.search_document(&doc, b"a", 8).unwrap().total_matches, 0);
+    assert_eq!(parser.search_raw("", b"a", 8).unwrap().total_matches, 0);
+}
+
+#[test]
+fn search_anchor_in_the_middle_and_at_the_text_edges() {
+    let parser = gpu!();
+    // 'q' is the rarest byte, so "abcq" anchors on pattern index 3. The occurrence
+    // at offset 0 puts the anchor at text position 3, the one at the very end puts
+    // it on the last byte.
+    let text = format!("abcq{}abcq", "abc".repeat(40_000));
+    assert_search_matches_cpu(&parser, &text, b"abcq");
+    // Anchor at index 0 and in the middle, same text.
+    assert_search_matches_cpu(&parser, &text, b"qabc");
+    assert_search_matches_cpu(&parser, &text, b"cabcqabc");
+    // A pattern whose rarest byte never occurs in the text: no candidates at all.
+    assert_search_matches_cpu(&parser, &text, b"abcz");
+    // Anchor candidates whose implied start would be before the text (index > position).
+    assert_search_matches_cpu(&parser, "qxyz", b"abcdq");
+}
+
+/// A filter-window hit near the start of the text implies a pattern start *before*
+/// the text. Unsigned arithmetic would wrap that to a huge offset; the kernel must
+/// reject it instead of reading out of range and (for a pattern starting with NUL,
+/// which out-of-range reads "match") reporting a bogus occurrence.
+#[test]
+fn search_rejects_window_hits_that_imply_a_start_before_the_text() {
+    let parser = gpu!();
+    // NUL is common in this text, so it is not rare: the filter window for the
+    // pattern below is "bcdq" (pattern index 1), whose only hit is at text offset 0.
+    let text = format!("bcdq{}xyz", "\0".repeat(5000));
+    let pattern = [0u8, b'b', b'c', b'd', b'q'];
+    assert!(oneline_simd::find_all(text.as_bytes(), &pattern).is_empty());
+    assert_search_matches_cpu(&parser, &text, &pattern);
+    let doc = parser.upload(&text).unwrap();
+    assert_eq!(parser.search_document(&doc, &pattern, 16).unwrap().total_matches, 0);
+}

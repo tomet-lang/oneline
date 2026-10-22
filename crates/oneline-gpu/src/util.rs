@@ -61,11 +61,12 @@ pub(crate) fn dispatch_dims(total_workgroups: u32) -> (u32, u32) {
 
 pub(crate) fn compute_pass<'e>(
     encoder: &'e mut wgpu::CommandEncoder,
-    label: &str,
+    label: &'static str,
+    timer: Option<&crate::timing::StageTimer>,
 ) -> wgpu::ComputePass<'e> {
     encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
         label: Some(label),
-        timestamp_writes: None,
+        timestamp_writes: timer.and_then(|t| t.writes(label)),
     })
 }
 

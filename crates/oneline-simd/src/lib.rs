@@ -13,6 +13,7 @@
 mod line;
 mod links;
 mod scan;
+mod search;
 
 use std::mem::MaybeUninit;
 
@@ -21,6 +22,7 @@ use oneline_core::{FlatNode, FlatTree, InputTooLarge, check_input_len};
 pub use line::parse_line;
 pub use links::build_links;
 pub use scan::{count_newlines, for_each_newline};
+pub use search::{count_all_par, find_all, find_all_par, try_find_all_par};
 
 /// Inputs smaller than this are not worth splitting across threads.
 const PAR_THRESHOLD: usize = 256 * 1024;

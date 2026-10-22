@@ -16,10 +16,14 @@ pub enum Profile {
     Mixed,
     /// Long lines (200..1500 chars): worst case for per-byte overhead.
     LongLines,
+    /// Natural-prose-like text: a 4096-word vocabulary used with a Zipf-like skew, so
+    /// words (and therefore pattern prefixes) are far less repetitive than in the
+    /// 23-word `Mixed` vocabulary. The realistic case for substring search.
+    Prose,
 }
 
 impl Profile {
-    pub const ALL: [Profile; 4] = [Self::Repeat, Self::ShortLines, Self::Mixed, Self::LongLines];
+    pub const ALL: [Profile; 5] = [Self::Repeat, Self::ShortLines, Self::Mixed, Self::LongLines, Self::Prose];
 
     pub const fn name(self) -> &'static str {
         match self {
@@ -27,6 +31,7 @@ impl Profile {
             Self::ShortLines => "short-lines",
             Self::Mixed => "mixed",
             Self::LongLines => "long-lines",
+            Self::Prose => "prose",
         }
     }
 }
@@ -69,13 +74,34 @@ const WORDS: &[&str] = &[
     "GPU", "縦棒", "階層", "構文", "解析", "naïve", "café", "データ", "|pipe|", "a", "of", "the",
 ];
 
-fn push_text(out: &mut String, rng: &mut Rng, target_len: usize) {
+/// The `Prose` vocabulary: 4096 pseudo-words of 2..=10 lowercase letters, fixed so
+/// benchmarks can pick patterns from it. Index 0 is the most frequent word.
+pub fn prose_vocabulary() -> Vec<String> {
+    let mut rng = Rng::new(0xC0FFEE);
+    (0..4096)
+        .map(|_| {
+            let len = rng.range(2, 11);
+            (0..len).map(|_| (b'a' + rng.below(26) as u8) as char).collect()
+        })
+        .collect()
+}
+
+/// Appends words until `target_len` bytes. With a `vocab` the pick is skewed
+/// (index ~ u^3), giving a Zipf-like frequency curve; without one, the small fixed
+/// `WORDS` list is used uniformly.
+fn push_text(out: &mut String, rng: &mut Rng, target_len: usize, vocab: Option<&[String]>) {
     let start = out.len();
     while out.len() - start < target_len {
         if out.len() > start {
             out.push(' ');
         }
-        out.push_str(WORDS[rng.below(WORDS.len() as u64) as usize]);
+        match vocab {
+            Some(v) => {
+                let u = rng.below(1 << 20) as f64 / (1u64 << 20) as f64;
+                out.push_str(&v[((u * u * u) * v.len() as f64) as usize % v.len()]);
+            }
+            None => out.push_str(WORDS[rng.below(WORDS.len() as u64) as usize]),
+        }
     }
 }
 
@@ -108,6 +134,7 @@ pub fn generate(profile: Profile, target_bytes: usize, seed: u64) -> String {
         return out;
     }
 
+    let vocab = (profile == Profile::Prose).then(prose_vocabulary);
     let mut depth = 1u32;
     while out.len() < target_bytes {
         // Depth follows a random walk, so subtrees open and close realistically.
@@ -138,19 +165,19 @@ pub fn generate(profile: Profile, target_bytes: usize, seed: u64) -> String {
             5..=9 => {
                 push_prefix(&mut out, depth);
                 out.push_str("=[ ");
-                push_text(&mut out, &mut rng, body_len.min(60));
+                push_text(&mut out, &mut rng, body_len.min(60), vocab.as_deref());
                 out.push_str(" ]");
             }
             10..=14 => {
                 push_prefix(&mut out, depth);
                 out.push_str(">[ ");
-                push_text(&mut out, &mut rng, body_len.min(60));
+                push_text(&mut out, &mut rng, body_len.min(60), vocab.as_deref());
                 out.push_str(" ]");
             }
             15..=22 => {
                 push_prefix(&mut out, depth);
                 out.push_str("@card(title: \"");
-                push_text(&mut out, &mut rng, body_len.min(30));
+                push_text(&mut out, &mut rng, body_len.min(30), vocab.as_deref());
                 out.push_str("\")");
             }
             23..=37 => {
@@ -160,7 +187,7 @@ pub fn generate(profile: Profile, target_bytes: usize, seed: u64) -> String {
                 } else {
                     out.push_str("1. ");
                 }
-                push_text(&mut out, &mut rng, body_len);
+                push_text(&mut out, &mut rng, body_len, vocab.as_deref());
             }
             38..=39 => {
                 push_prefix(&mut out, depth);
@@ -168,7 +195,7 @@ pub fn generate(profile: Profile, target_bytes: usize, seed: u64) -> String {
             }
             _ => {
                 push_prefix(&mut out, depth);
-                push_text(&mut out, &mut rng, body_len);
+                push_text(&mut out, &mut rng, body_len, vocab.as_deref());
             }
         }
         eol(&mut out, &mut rng, crlf);

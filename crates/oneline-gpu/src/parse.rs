@@ -2,6 +2,7 @@ use anyhow::Result;
 use oneline_core::{FlatNode, FlatTree};
 
 use crate::parser::GpuParser;
+use crate::timing::{StageTimer, mark};
 use crate::util::{bind, check_gpu_len, compute_pass, dispatch_dims, map_all, staging_buffer, take_mapped};
 use crate::ShaderConfig;
 
@@ -19,6 +20,7 @@ impl GpuParser {
         line_offsets: &wgpu::Buffer,
         line_count: u32,
         text_len: u32,
+        timer: Option<&StageTimer>,
     ) -> Result<ParsedNodes> {
         let node_bytes = u64::from(line_count) * std::mem::size_of::<FlatNode>() as u64;
         self.check_fits(node_bytes, "the parsed nodes")?;
@@ -35,16 +37,18 @@ impl GpuParser {
             layout: &self.parse_layout,
             entries: &[bind(0, input_buffer), bind(1, line_offsets), bind(2, &config), bind(3, &nodes)],
         });
+        mark(timer, "parse: create buffers + bind group");
 
         let (wg_x, wg_y) = dispatch_dims(line_count.div_ceil(64));
         let mut encoder = self.device.create_command_encoder(&Default::default());
         {
-            let mut pass = compute_pass(&mut encoder, "Oneline Parse Pass");
+            let mut pass = compute_pass(&mut encoder, "parse lines", timer);
             pass.set_pipeline(&self.parse_pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
             pass.dispatch_workgroups(wg_x, wg_y, 1);
         }
         self.queue.submit(Some(encoder.finish()));
+        mark(timer, "parse: encode + submit");
 
         Ok(ParsedNodes { nodes, bind_group })
     }
@@ -69,9 +73,9 @@ impl GpuParser {
         }
         let text_len = input.len() as u32;
 
-        let input_buffer = self.upload_text(input)?;
-        let (line_offsets, line_count) = self.scan_to_buffer(&input_buffer, text_len)?;
-        let parsed = self.parse_to_buffer(&input_buffer, &line_offsets, line_count, text_len)?;
+        let input_buffer = self.upload_text(input, None)?;
+        let (line_offsets, line_count) = self.scan_to_buffer(&input_buffer, text_len, None)?;
+        let parsed = self.parse_to_buffer(&input_buffer, &line_offsets, line_count, text_len, None)?;
 
         let nodes = self.download_nodes(&parsed.nodes, line_count as usize)?;
         let offsets = self.download_u32s(&line_offsets, line_count as usize)?;
@@ -87,9 +91,9 @@ impl GpuParser {
         }
         let text_len = input.len() as u32;
 
-        let input_buffer = self.upload_text(input)?;
+        let input_buffer = self.upload_text(input, None)?;
         let offsets_buffer = self.upload_u32s("Line Offset Buffer", line_offsets)?;
-        let parsed = self.parse_to_buffer(&input_buffer, &offsets_buffer, line_count as u32, text_len)?;
+        let parsed = self.parse_to_buffer(&input_buffer, &offsets_buffer, line_count as u32, text_len, None)?;
 
         let nodes = self.download_nodes(&parsed.nodes, line_count)?;
         Ok(FlatTree::new(input, nodes, line_offsets.to_vec()))

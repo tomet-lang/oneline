@@ -6,7 +6,7 @@ use oneline_core::NodeKind;
 
 use super::{report, time_avg};
 
-fn parse_kind(k: &str) -> Option<NodeKind> {
+pub(crate) fn parse_kind(k: &str) -> Option<NodeKind> {
     match k.to_lowercase().as_str() {
         "heading" => Some(NodeKind::Heading),
         "element" => Some(NodeKind::Element),

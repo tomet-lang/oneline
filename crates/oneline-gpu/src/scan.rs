@@ -1,6 +1,7 @@
 use anyhow::Result;
 
 use crate::parser::GpuParser;
+use crate::timing::{StageTimer, mark};
 use crate::util::{
     bind, check_gpu_len, compute_pass, dispatch_dims, map_all, staging_buffer, take_mapped,
 };
@@ -19,6 +20,7 @@ impl GpuParser {
         &self,
         input_buffer: &wgpu::Buffer,
         text_len: u32,
+        timer: Option<&StageTimer>,
     ) -> Result<(wgpu::Buffer, u32)> {
         let num_blocks = text_len.div_ceil(BLOCK_BYTES).max(1);
 
@@ -54,36 +56,39 @@ impl GpuParser {
                 bind(4, &scan_meta),
             ],
         });
+        mark(timer, "scan: create buffers + bind group");
 
         let (wg_x, wg_y) = dispatch_dims(num_blocks);
 
         // Pass 1 (per-block newline counts) and pass 2 (scan of the block counts).
         let mut encoder = self.device.create_command_encoder(&Default::default());
         {
-            let mut pass = compute_pass(&mut encoder, "Scan Pass 1 (Count Newlines)");
+            let mut pass = compute_pass(&mut encoder, "scan pass 1 (count newlines)", timer);
             pass.set_pipeline(&self.scan_count_pipeline);
             pass.set_bind_group(0, &scan_bind_group, &[]);
             pass.dispatch_workgroups(wg_x, wg_y, 1);
         }
         {
-            let mut pass = compute_pass(&mut encoder, "Scan Pass 2 (Scan Block Counts)");
+            let mut pass = compute_pass(&mut encoder, "scan pass 2 (scan block counts)", timer);
             pass.set_pipeline(&self.scan_blocks_pipeline);
             pass.set_bind_group(0, &scan_bind_group, &[]);
             pass.dispatch_workgroups(1, 1, 1);
         }
         encoder.copy_buffer_to_buffer(&scan_meta, 0, &staging_meta, 0, 16);
         self.queue.submit(Some(encoder.finish()));
+        mark(timer, "scan: encode + submit passes 1-2");
 
         map_all(&self.device, &[&staging_meta])?;
         let total_lines = take_mapped::<u32>(&staging_meta, 1)[0];
+        mark(timer, "scan: wait for passes 1-2 + read line count");
 
+        self.check_fits(u64::from(total_lines) * 4, "the line offsets")?;
         let line_offsets = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Line Offsets Buffer"),
             size: (u64::from(total_lines) * 4).max(4),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
-        self.check_fits(u64::from(total_lines) * 4, "the line offsets")?;
         let scatter_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Scatter Bind Group 1"),
             layout: &self.scatter_layout,
@@ -93,13 +98,14 @@ impl GpuParser {
         // Pass 3: scatter offsets into their final slots.
         let mut encoder = self.device.create_command_encoder(&Default::default());
         {
-            let mut pass = compute_pass(&mut encoder, "Scan Pass 3 (Scatter Line Offsets)");
+            let mut pass = compute_pass(&mut encoder, "scan pass 3 (scatter offsets)", timer);
             pass.set_pipeline(&self.scan_scatter_pipeline);
             pass.set_bind_group(0, &scan_bind_group, &[]);
             pass.set_bind_group(1, &scatter_bind_group, &[]);
             pass.dispatch_workgroups(wg_x, wg_y, 1);
         }
         self.queue.submit(Some(encoder.finish()));
+        mark(timer, "scan: allocate offsets + submit pass 3");
 
         Ok((line_offsets, total_lines))
     }
@@ -110,8 +116,8 @@ impl GpuParser {
         if input.is_empty() {
             return Ok(Vec::new());
         }
-        let input_buffer = self.upload_text(input)?;
-        let (line_offsets, total_lines) = self.scan_to_buffer(&input_buffer, input.len() as u32)?;
+        let input_buffer = self.upload_text(input, None)?;
+        let (line_offsets, total_lines) = self.scan_to_buffer(&input_buffer, input.len() as u32, None)?;
         self.download_u32s(&line_offsets, total_lines as usize)
     }
 

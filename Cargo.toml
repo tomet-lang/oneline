@@ -38,6 +38,7 @@ wgpu = "24"
 anyhow = "1"
 clap = { version = "4.5", features = ["derive"] }
 mimalloc = { version = "0.1", default-features = false }
+memchr = "2"
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 
 [profile.release]

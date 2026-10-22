@@ -9,3 +9,4 @@ oneline-core = { workspace = true }
 #= Crates.io
 anyhow = { workspace = true }
 rayon = { workspace = true }
+memchr = { workspace = true }

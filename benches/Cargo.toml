@@ -9,6 +9,7 @@ publish = false
 oneline-core = { workspace = true }
 oneline-simd = { workspace = true }
 oneline-gpu = { workspace = true }
+#= Crates.io
 rayon = { workspace = true }
 criterion = { workspace = true }
 

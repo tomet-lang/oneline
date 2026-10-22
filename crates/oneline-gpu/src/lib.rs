@@ -15,6 +15,8 @@ mod parse;
 mod parser;
 mod query;
 mod scan;
+mod search;
+mod timing;
 #[cfg(test)]
 mod tests;
 mod util;
@@ -22,6 +24,8 @@ mod util;
 pub use document::GpuDocument;
 pub use parser::GpuParser;
 pub use query::QueryResult;
+pub use search::SearchResult;
+pub use timing::Profile;
 pub use util::MAX_GPU_INPUT_LEN;
 
 #[repr(C)]
@@ -47,4 +51,18 @@ pub(crate) struct QueryConfig {
     pub target_depth: u32,
     pub max_matches: u32,
     pub _pad: u32,
+}
+
+/// Longest pattern `search_*` accepts (it travels in a uniform buffer).
+pub const MAX_PATTERN_LEN: usize = 64;
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+pub(crate) struct SearchConfig {
+    pub text_len: u32,
+    pub pattern_len: u32,
+    pub max_matches: u32,
+    /// Index in the pattern of the 4-byte filter window.
+    pub window: u32,
+    pub pattern: [u32; 16],
 }

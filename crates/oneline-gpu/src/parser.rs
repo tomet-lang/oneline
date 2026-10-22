@@ -1,6 +1,7 @@
 use anyhow::{Result, anyhow};
 use wgpu::util::DeviceExt;
 
+use crate::timing::{StageTimer, mark};
 use crate::util::{check_gpu_len, storage_entry, uniform_entry};
 
 /// Massively parallel GPU parser powered by wgpu Compute Shaders.
@@ -10,6 +11,10 @@ pub struct GpuParser {
     pub(crate) limits: wgpu::Limits,
     adapter_name: String,
     software: bool,
+    pub(crate) timestamps: bool,
+    /// Reused buffers for queries, so a query does not allocate. Guarded because
+    /// a query reads results back through the shared staging buffer.
+    pub(crate) query_scratch: std::sync::Mutex<Option<crate::query::QueryScratch>>,
 
     // Stage 2/3 pipelines (`shader.wgsl`).
     pub(crate) parse_pipeline: wgpu::ComputePipeline,
@@ -22,6 +27,9 @@ pub struct GpuParser {
     /// Group 0 without the nodes binding, for the fused kernel.
     pub(crate) fused_layout: wgpu::BindGroupLayout,
     pub(crate) query_layout: wgpu::BindGroupLayout,
+    /// Substring search (`search.wgsl`): group 0 is just the text; group 1 reuses `query_layout`.
+    pub(crate) search_pipeline: wgpu::ComputePipeline,
+    pub(crate) text_layout: wgpu::BindGroupLayout,
 
     // Stage 1 prefix-scan pipelines (`scan.wgsl`).
     pub(crate) scan_count_pipeline: wgpu::ComputePipeline,
@@ -93,11 +101,12 @@ impl GpuParser {
         let info = adapter.get_info();
         let (adapter_name, software) = (info.name.clone(), info.device_type == wgpu::DeviceType::Cpu);
         let limits = adapter.limits();
+        let timestamps = adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY);
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: Some("Oneline GPU Parser Device"),
-                    required_features: wgpu::Features::empty(),
+                    required_features: if timestamps { wgpu::Features::TIMESTAMP_QUERY } else { wgpu::Features::empty() },
                     required_limits: limits.clone(),
                     memory_hints: wgpu::MemoryHints::Performance,
                 },
@@ -152,6 +161,15 @@ impl GpuParser {
             &[&fused_layout, &query_layout],
         );
 
+
+        // Substring search.
+        let search_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Oneline Search Compute Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("search.wgsl").into()),
+        });
+        let text_layout = bind_layout(&device, "Search Text Bind Group Layout", &[storage_entry(0, true)]);
+        let search_pipeline = pipeline(&device, "Search", &search_shader, "search", &[&text_layout, &query_layout]);
+
         // Stage 1: line-offset prefix scan.
         let scan_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Oneline Scan Compute Shader"),
@@ -188,12 +206,16 @@ impl GpuParser {
             limits,
             adapter_name,
             software,
+            timestamps,
+            query_scratch: std::sync::Mutex::new(None),
             parse_pipeline,
             filter_pipeline,
             fused_pipeline,
             parse_layout,
             fused_layout,
             query_layout,
+            search_pipeline,
+            text_layout,
             scan_count_pipeline,
             scan_blocks_pipeline,
             scan_scatter_pipeline,
@@ -217,7 +239,7 @@ impl GpuParser {
     }
 
     /// Uploads the text as a `u32`-packed storage buffer with a single host copy.
-    pub(crate) fn upload_text(&self, input: &str) -> Result<wgpu::Buffer> {
+    pub(crate) fn upload_text(&self, input: &str, timer: Option<&StageTimer>) -> Result<wgpu::Buffer> {
         let len = input.len();
         check_gpu_len(len)?;
         let padded = ((len + 3) & !3).max(4) as u64;
@@ -229,12 +251,15 @@ impl GpuParser {
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: true,
         });
+        mark(timer, "upload_text: create mapped buffer");
         {
             // Mapped-at-creation memory is zeroed, which provides the padding bytes.
             let mut view = buffer.slice(..).get_mapped_range_mut();
             view[..len].copy_from_slice(input.as_bytes());
         }
+        mark(timer, "upload_text: host memcpy into mapped memory");
         buffer.unmap();
+        mark(timer, "upload_text: unmap (wgpu staging copy)");
         Ok(buffer)
     }
 
