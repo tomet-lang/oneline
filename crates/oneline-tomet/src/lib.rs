@@ -2,7 +2,7 @@ use anyhow::Result;
 use oneline_core::{FlatNode, FlatTree, NONE, NodeKind, TreeLinks};
 use rayon::prelude::*;
 use tomet_ast::{
-    Block, Document, Element, Inline, List, Name, Paragraph, Section, Sigil, Span, Text,
+    Block, Document, Inline, List, Paragraph, Section, Span, Text,
 };
 
 /// Converts FlatTree into a canonical tomet AST (tomet_ast::Document).
@@ -65,10 +65,9 @@ pub fn to_tomet_ast_with_links(tree: &FlatTree, links: &TreeLinks) -> Result<Doc
 fn parse_line_to_block(node: &FlatNode, text: &str) -> Block {
     match node.kind() {
         NodeKind::Heading => {
-            // "=[ Header ]" or ">[ Header ]"
+            // "=[ Header ]" or "= Header"
             let title_text = text
                 .trim_start_matches('=')
-                .trim_start_matches('>')
                 .trim_start_matches('[')
                 .trim_end_matches(']')
                 .trim();
@@ -88,22 +87,8 @@ fn parse_line_to_block(node: &FlatNode, text: &str) -> Block {
                 Span::dummy(),
             ))
         }
-        NodeKind::Callout => {
-            // ">[ Callout ]" -> construct @callout element.
-            let callout_title = text
-                .trim_start_matches('>')
-                .trim_start_matches('[')
-                .trim_end_matches(']')
-                .trim();
-            let mut el = Element::default();
-            el.sigil = Sigil::Named(Name::bare("callout"));
-            if !callout_title.is_empty() {
-                el.args = Some(tomet_ast::Value::String(callout_title.to_string()));
-            }
-            Block::Element(el)
-        }
-        NodeKind::List => {
-            // Use tomet-parser to parse list item.
+        NodeKind::List | NodeKind::Connect => {
+            // Use tomet-parser to parse the list item or connect line.
             if let Ok(doc) = tomet_parser::parse_document(text) {
                 if let Some(first_block) = doc.blocks.into_iter().next() {
                     return first_block;
@@ -188,6 +173,7 @@ fn attach_sublist(slot: &mut Option<List>, sub: List) {
 mod tests {
     use super::*;
     use oneline_core::datagen::Rng;
+    use tomet_ast::Element;
 
     /// The previous stack-based builder, kept as an oracle for documents whose
     /// structure it handled without dropping anything.
@@ -296,7 +282,7 @@ mod tests {
         }
     }
 
-    /// Random documents in which only containers (heading / element / callout)
+    /// Random documents in which only containers (heading / element)
     /// have children — the shape the old builder handled losslessly.
     fn container_only_doc(rng: &mut Rng, lines: usize) -> String {
         let mut out = String::new();
@@ -305,12 +291,12 @@ mod tests {
         for _ in 0..lines {
             let (text, container) = match rng.below(7) {
                 0 => ("=[ Title ]", true),
-                1 => (">[ Note ]", true),
+                1 => ("@note(title: \"n\")", true),
                 2 => ("@card(title: \"t\")", true),
                 3 => ("- item", false),
                 4 => ("plain prose", false),
                 5 => ("", false), // blank: not part of the tree, must not touch `open`
-                _ => ("1. numbered", false),
+                _ => ("- numbered", false),
             };
             // Pick a depth whose parent (nearest shallower open line) is a container.
             let depth = loop {

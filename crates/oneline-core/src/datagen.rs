@@ -132,7 +132,7 @@ pub fn generate(profile: Profile, target_bytes: usize, seed: u64) -> String {
     let mut rng = Rng::new(seed);
 
     if profile == Profile::Repeat {
-        let sample = "|>[ Header ]\n| Is this syntax necessary?\n||>[ Callout ]\n|| Content.\n|||- Item A\n|||- Item B\n";
+        let sample = "|=[ Header ]\n| Is this syntax necessary?\n||@card(title: \"x\")\n||:rule(allow:list(card))\n|| Content.\n|||- Item A\n|||- Item B\n";
         while out.len() < target_bytes {
             out.push_str(sample);
         }
@@ -191,9 +191,9 @@ pub fn generate(profile: Profile, target_bytes: usize, seed: u64) -> String {
             }
             10..=14 => {
                 push_prefix(&mut out, depth);
-                out.push_str(">[ ");
+                out.push_str(":rule(");
                 push_text(&mut out, &mut rng, body_len.min(60), vocab.as_deref());
-                out.push_str(" ]");
+                out.push_str(")");
             }
             15..=22 => {
                 push_prefix(&mut out, depth);
@@ -203,16 +203,8 @@ pub fn generate(profile: Profile, target_bytes: usize, seed: u64) -> String {
             }
             23..=37 => {
                 push_prefix(&mut out, depth);
-                if rng.chance(70) {
-                    out.push_str("- ");
-                } else {
-                    out.push_str("1. ");
-                }
+                out.push_str("- ");
                 push_text(&mut out, &mut rng, body_len, vocab.as_deref());
-            }
-            38..=39 => {
-                push_prefix(&mut out, depth);
-                out.push_str("```");
             }
             _ => {
                 push_prefix(&mut out, depth);

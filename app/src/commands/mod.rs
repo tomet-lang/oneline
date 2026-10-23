@@ -100,7 +100,7 @@ enum Commands {
         #[arg(long, default_value = "mixed")]
         profile: DataProfile,
 
-        /// Node kind to query (heading, element, list, callout, text, raw)
+        /// Node kind to query (heading, element, list, connect, text)
         #[arg(short, long, default_value = "heading")]
         kind: String,
 
@@ -121,7 +121,7 @@ enum Commands {
         /// Path to input file (optional if --bench-mb is given)
         file: Option<PathBuf>,
 
-        /// Filter by node kind (heading, element, list, callout, text, raw)
+        /// Filter by node kind (heading, element, list, connect, text)
         #[arg(short, long)]
         kind: Option<String>,
 

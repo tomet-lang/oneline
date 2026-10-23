@@ -11,9 +11,8 @@ pub(crate) fn parse_kind(k: &str) -> Option<NodeKind> {
         "heading" => Some(NodeKind::Heading),
         "element" => Some(NodeKind::Element),
         "list" => Some(NodeKind::List),
-        "callout" => Some(NodeKind::Callout),
         "text" => Some(NodeKind::Text),
-        "raw" => Some(NodeKind::Raw),
+        "connect" => Some(NodeKind::Connect),
         _ => None,
     }
 }
@@ -27,7 +26,7 @@ pub fn run_query(
 ) -> Result<()> {
     let node_kind = match kind {
         None => None,
-        Some(k) => Some(parse_kind(k).with_context(|| format!("unknown kind {k:?} (heading, element, list, callout, text, raw)"))?),
+        Some(k) => Some(parse_kind(k).with_context(|| format!("unknown kind {k:?} (heading, element, list, connect, text)"))?),
     };
     let parser = oneline_gpu::GpuParser::new().context("Failed to initialize GPU parser for query")?;
 

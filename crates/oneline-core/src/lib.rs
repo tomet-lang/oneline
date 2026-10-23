@@ -44,8 +44,7 @@ pub enum NodeKind {
     Heading = 2,
     Element = 3,
     List = 4,
-    Callout = 5,
-    Raw = 6,
+    Connect = 5,
     Unknown = 99,
 }
 
@@ -57,8 +56,7 @@ impl NodeKind {
             2 => Self::Heading,
             3 => Self::Element,
             4 => Self::List,
-            5 => Self::Callout,
-            6 => Self::Raw,
+            5 => Self::Connect,
             _ => Self::Unknown,
         }
     }
@@ -70,8 +68,7 @@ impl NodeKind {
             Self::Heading => "heading",
             Self::Element => "element",
             Self::List => "list",
-            Self::Callout => "callout",
-            Self::Raw => "raw",
+            Self::Connect => "connect",
             Self::Unknown => "unknown",
         }
     }

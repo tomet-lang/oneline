@@ -84,38 +84,19 @@ fn parse_one(tid: u32) -> FlatNode {
     if (first_b == 61u) {
         // '=' (Heading)
         kind = 2u;
-    } else if (first_b == 62u) {
-        // '>' (Callout / Header)
+    } else if (first_b == 58u) {
+        // ':' (Connect)
         kind = 5u;
     } else if (first_b == 64u) {
         // '@' (Element)
         kind = 3u;
-    } else if (first_b == 45u || first_b == 42u) {
-        // '-' (45) or '*' (42) (List)
+    } else if (first_b == 45u) {
+        // '-' (List) when followed by a blank
         if (cursor + 1u < eff_end) {
             let next_b = get_byte(cursor + 1u);
             if (next_b == 32u || next_b == 9u) {
                 kind = 4u;
             }
-        }
-    } else if (first_b == 96u) {
-        // '`' (Codeblock)
-        if (cursor + 2u < eff_end && get_byte(cursor + 1u) == 96u && get_byte(cursor + 2u) == 96u) {
-            kind = 6u;
-        }
-    } else if (first_b >= 48u && first_b <= 57u) {
-        // Numbered list item: digits, '.', ' ' (e.g. "1. "). Mirrors `classify_line`
-        // in oneline-simd; this branch was missing and GPU/CPU disagreed.
-        var idx = cursor + 1u;
-        while (idx < eff_end) {
-            let d = get_byte(idx);
-            if (d < 48u || d > 57u) {
-                break;
-            }
-            idx = idx + 1u;
-        }
-        if (idx + 1u < eff_end && get_byte(idx) == 46u && get_byte(idx + 1u) == 32u) {
-            kind = 4u;
         }
     }
 

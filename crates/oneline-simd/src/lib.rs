@@ -484,9 +484,9 @@ mod tests {
         assert_eq!(l1.depth, 1);
         assert_eq!(l1.kind(), NodeKind::Element);
 
-        let l2 = parse_line(b"||>[ Callout ]\n", 0);
+        let l2 = parse_line(b"||:rule(allow:list(card))\n", 0);
         assert_eq!(l2.depth, 2);
-        assert_eq!(l2.kind(), NodeKind::Callout);
+        assert_eq!(l2.kind(), NodeKind::Connect);
 
         let l3 = parse_line(b"|||- List item\n", 0);
         assert_eq!(l3.depth, 3);
@@ -499,15 +499,15 @@ mod tests {
 
     #[test]
     fn test_parse_document() {
-        let doc = "|>[ Header ]\n| Is this syntax necessary?\n||>[ Callout ]\n|| Body text.\n";
+        let doc = "|=[ Header ]\n| Is this syntax necessary?\n||:rule(x)\n|| Body text.\n";
         let tree = parse(doc);
         assert_eq!(tree.nodes.len(), 4);
         assert_eq!(tree.nodes[0].depth, 1);
-        assert_eq!(tree.nodes[0].kind(), NodeKind::Callout);
+        assert_eq!(tree.nodes[0].kind(), NodeKind::Heading);
         assert_eq!(tree.nodes[1].depth, 1);
         assert_eq!(tree.nodes[1].kind(), NodeKind::Text);
         assert_eq!(tree.nodes[2].depth, 2);
-        assert_eq!(tree.nodes[2].kind(), NodeKind::Callout);
+        assert_eq!(tree.nodes[2].kind(), NodeKind::Connect);
         assert_eq!(tree.nodes[3].depth, 2);
         assert_eq!(tree.nodes[3].kind(), NodeKind::Text);
     }

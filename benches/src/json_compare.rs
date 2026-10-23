@@ -60,8 +60,7 @@ fn kind_name(kind: NodeKind) -> &'static str {
         NodeKind::Heading => "heading",
         NodeKind::Element => "element",
         NodeKind::List => "list",
-        NodeKind::Callout => "callout",
-        NodeKind::Raw => "raw",
+        NodeKind::Connect => "connect",
         NodeKind::Unknown => "unknown",
     }
 }

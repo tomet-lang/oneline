@@ -28,14 +28,14 @@ macro_rules! gpu {
 #[test]
 fn test_gpu_parser_basic() {
     let parser = gpu!();
-    let text = "|>[ Header ]\n| Body text\n||>[ Callout ]\n|| Content.\n";
+    let text = "|=[ Header ]\n| Body text\n||:rule(x)\n|| Content.\n";
     let offsets = oneline_simd::scan_line_offsets(text.as_bytes());
     let tree = parser.parse(text, &offsets).unwrap();
 
     assert_eq!(tree.nodes.len(), 4);
-    assert_eq!((tree.nodes[0].depth, tree.nodes[0].kind()), (1, NodeKind::Callout));
+    assert_eq!((tree.nodes[0].depth, tree.nodes[0].kind()), (1, NodeKind::Heading));
     assert_eq!((tree.nodes[1].depth, tree.nodes[1].kind()), (1, NodeKind::Text));
-    assert_eq!((tree.nodes[2].depth, tree.nodes[2].kind()), (2, NodeKind::Callout));
+    assert_eq!((tree.nodes[2].depth, tree.nodes[2].kind()), (2, NodeKind::Connect));
     assert_eq!((tree.nodes[3].depth, tree.nodes[3].kind()), (2, NodeKind::Text));
 }
 
@@ -48,7 +48,7 @@ fn test_gpu_scan_line_offsets_various() {
         "line1\nline2\nline3\n",
         "line1\r\nline2\r\nline3\r\n",
         "\n\n\n",
-        "|>[ Header ]\n| Paragraph\n|| Content\n",
+        "|=[ Header ]\n| Paragraph\n|| Content\n",
     ] {
         let cpu = oneline_simd::scan_line_offsets(case.as_bytes());
         assert_eq!(parser.scan_line_offsets(case).unwrap(), cpu, "case {case:?}");
@@ -58,12 +58,12 @@ fn test_gpu_scan_line_offsets_various() {
 #[test]
 fn test_gpu_parse_raw() {
     let parser = gpu!();
-    let text = "|>[ Header ]\n| Body text\n||>[ Callout ]\n|| Content.\n";
+    let text = "|=[ Header ]\n| Body text\n||:rule(x)\n|| Content.\n";
     let tree = parser.parse_raw(text).unwrap();
     assert_eq!(tree.nodes.len(), 4);
-    assert_eq!(tree.nodes[0].kind(), NodeKind::Callout);
+    assert_eq!(tree.nodes[0].kind(), NodeKind::Heading);
     assert_eq!(tree.nodes[3].depth, 2);
-    assert_eq!(tree.line_offsets, vec![0, 13, 25, 40]);
+    assert_eq!(tree.line_offsets, vec![0, 13, 25, 36]);
 }
 
 #[test]
@@ -82,7 +82,10 @@ fn test_gpu_query_raw() {
 #[test]
 fn gpu_parse_matches_cpu() {
     let parser = gpu!();
-    for case in ["x", "x\n", "\n", "\r\n", "a\r\nb", "||||\n|||| \n", "```\n- x\n```\n", "| 日本語\n"] {
+    for case in ["x", "x\n", "\n", "\r\n", "a\r\nb", "||||\n|||| \n", "```\n- x\n```\n", "| 日本語\n",
+        // tomet grammar boundaries: list needs a blank after `-`; `>`, `*`, `1.` and fences are plain text.
+        "-\tx\n", "- x\n", "-x\n", "-\n", "- \n", ":rule(a)\n|| :{y:2}\n", "=\n=[ t ]\n", "@\n",
+        "> a\n* b\n1. c\n", "|-\tx\n|:y\n"] {
         let cpu = oneline_simd::parse(case);
         let gpu = parser.parse_raw(case).unwrap();
         assert_eq!(gpu, cpu, "case {case:?}");
@@ -126,7 +129,7 @@ fn resident_and_fused_queries_match_cpu() {
     assert_eq!(doc.text_len(), text.len());
 
     let kinds = [None, Some(NodeKind::Text), Some(NodeKind::Heading), Some(NodeKind::Element),
-                 Some(NodeKind::List), Some(NodeKind::Callout), Some(NodeKind::Raw)];
+                 Some(NodeKind::List), Some(NodeKind::Connect)];
     let depths = [None, Some(0), Some(1), Some(3), Some(50)];
     let all = tree.nodes.len();
     for &kind in &kinds {

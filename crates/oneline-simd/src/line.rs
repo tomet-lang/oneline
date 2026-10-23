@@ -30,58 +30,33 @@ pub fn parse_line(line: &[u8], line_start: u32) -> FlatNode {
     FlatNode::new(depth as u32, classify_line(content), span_start, content.len() as u32)
 }
 
-/// What a line's first byte says about it. `0` = plain text unless proven otherwise.
+/// What a line's first byte says about it. `0` = plain text.
 const FIRST_BYTE: [u8; 256] = {
     let mut t = [0u8; 256];
     t[b'=' as usize] = 1;
-    t[b'>' as usize] = 2;
+    t[b':' as usize] = 2;
     t[b'@' as usize] = 3;
     t[b'-' as usize] = 4;
-    t[b'*' as usize] = 4;
-    t[b'`' as usize] = 5;
-    let mut d = b'0';
-    while d <= b'9' {
-        t[d as usize] = 6;
-        d += 1;
-    }
     t
 };
 
-/// Classifies syntax kind from leading line tokens (tomet / oneline compatible).
+/// Classifies the line by its first byte (tomet syntax).
 #[inline]
 fn classify_line(bytes: &[u8]) -> NodeKind {
-    // One table load and (for the common plain-text line) one predictable branch,
-    // instead of a chain of comparisons.
+    // One table load and (for the common plain-text line) one predictable branch.
     match FIRST_BYTE[bytes[0] as usize] {
         0 => NodeKind::Text,
-        // Heading: =[ Header ] or ==[ Subheader ]
+        // Section heading: `=[ title ]` or `= title`
         1 => NodeKind::Heading,
-        // Callout or Header: >[ Header ] or >> Content
-        2 => NodeKind::Callout,
-        // Element: @card(...) or @memo[ ... ]
+        // Connect: `:rule(..)`, `:{..}`, attached to the element before it
+        2 => NodeKind::Connect,
+        // Element: `@card(..)`
         3 => NodeKind::Element,
-        // List: "- Item" or "* Item"
-        4 => match bytes.get(1) {
+        // List item: `- item`
+        _ => match bytes.get(1) {
             Some(b' ' | b'\t') => NodeKind::List,
             _ => NodeKind::Text,
         },
-        // Fenced code block: ```
-        5 => {
-            if bytes.starts_with(b"```") {
-                NodeKind::Raw
-            } else {
-                NodeKind::Text
-            }
-        }
-        // Numbered list item (e.g. "1. ")
-        _ => {
-            let digits = bytes.iter().take_while(|b| b.is_ascii_digit()).count();
-            if bytes.get(digits) == Some(&b'.') && bytes.get(digits + 1) == Some(&b' ') {
-                NodeKind::List
-            } else {
-                NodeKind::Text
-            }
-        }
     }
 }
 
@@ -119,37 +94,10 @@ mod tests {
         let rest = &line_bytes[content_start..eff_len];
         let kind = match rest[0] {
             b'=' => NodeKind::Heading,
-            b'>' => NodeKind::Callout,
+            b':' => NodeKind::Connect,
             b'@' => NodeKind::Element,
-            b'-' | b'*' => {
-                if rest.len() > 1 && (rest[1] == b' ' || rest[1] == b'\t') {
-                    NodeKind::List
-                } else {
-                    NodeKind::Text
-                }
-            }
-            b'`' => {
-                if rest.starts_with(b"```") {
-                    NodeKind::Raw
-                } else {
-                    NodeKind::Text
-                }
-            }
-            _ => {
-                if rest[0].is_ascii_digit() {
-                    let mut idx = 1;
-                    while idx < rest.len() && rest[idx].is_ascii_digit() {
-                        idx += 1;
-                    }
-                    if idx < rest.len() && rest[idx] == b'.' && idx + 1 < rest.len() && rest[idx + 1] == b' ' {
-                        NodeKind::List
-                    } else {
-                        NodeKind::Text
-                    }
-                } else {
-                    NodeKind::Text
-                }
-            }
+            b'-' if rest.len() > 1 && (rest[1] == b' ' || rest[1] == b'\t') => NodeKind::List,
+            _ => NodeKind::Text,
         };
         FlatNode::new(depth as u32, kind, span_start, span_len)
     }
@@ -158,7 +106,7 @@ mod tests {
     fn matches_reference_on_random_lines() {
         // A small alphabet makes every structural case (prefixes, blanks, markers, digits,
         // CR/LF runs, backtick runs) occur constantly, including at awkward lengths.
-        let alphabet: &[u8] = b"|| \t=>@-*`0123456789.\r\nxy";
+        let alphabet: &[u8] = b"|| \t=:@->*`0123456789.\r\nxy";
         let mut rng = Rng::new(4242);
         for round in 0..300_000 {
             let len = rng.below(14) as usize;
@@ -171,7 +119,7 @@ mod tests {
     #[test]
     fn matches_reference_on_all_short_lines() {
         // Exhaustive over a 7-symbol alphabet up to length 6.
-        let alphabet = *b"| -1.`\n";
+        let alphabet = *b"| -:=@\n";
         fn go(prefix: &mut Vec<u8>, alphabet: &[u8], depth: usize) {
             assert_eq!(parse_line(prefix, 7), reference(prefix, 7), "{prefix:?}");
             if depth == 0 {
