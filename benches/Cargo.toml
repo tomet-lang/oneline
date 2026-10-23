@@ -12,6 +12,10 @@ oneline-gpu = { workspace = true }
 #= Crates.io
 rayon = { workspace = true }
 criterion = { workspace = true }
+#= simdjson comparison (needs cmake; `--features simdjson`)
+simdjson-sys = { workspace = true, optional = true }
+simd-json = { workspace = true, optional = true }
+simdutf8 = { workspace = true, optional = true }
 
 [[bench]]
 name = "parse_simd"
@@ -24,3 +28,11 @@ harness = false
 [[bench]]
 name = "comparison"
 harness = false
+
+[features]
+simdjson = ["dep:simdjson-sys", "dep:simd-json", "dep:simdutf8"]
+
+[[bin]]
+name = "json_compare"
+path = "src/json_compare.rs"
+required-features = ["simdjson"]

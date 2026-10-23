@@ -41,6 +41,9 @@ mimalloc = { version = "0.1", default-features = false }
 memchr = "2"
 aho-corasick = "1"
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+simdjson-sys = "=0.4.0-alpha.2"
+simd-json = "0.18"
+simdutf8 = "0.1"
 
 [profile.release]
 opt-level = 3
