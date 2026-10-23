@@ -176,6 +176,112 @@ fn build<'a>(input: &'a str, chunks: &[(usize, usize)], parallel: bool) -> FlatT
     FlatTree::new(input, nodes, offsets)
 }
 
+
+/// How `parse_par` obtains output space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParStrategy {
+    /// Pick by estimated output size (see [`prefers_gather`]).
+    Auto,
+    /// Count lines per chunk first, then fill the final arrays directly. Reads the text twice
+    /// but copies nothing: best when the output is large relative to the text.
+    TwoPass,
+    /// Parse each chunk once into its own buffers, then copy them into the final arrays in
+    /// parallel. Reads the text once: best when the text is much larger than the output
+    /// and DRAM-bound.
+    Gather,
+}
+
+/// Inputs below this are served from cache often enough that the extra read is cheap.
+const GATHER_MIN_LEN: usize = 32 << 20;
+/// Gather only if the (node + offset) output is at most this fraction of the text.
+const GATHER_MAX_OUTPUT_RATIO: f64 = 0.5;
+
+/// Estimated bytes of output (20 per line) per byte of text, from a few small windows.
+fn output_ratio(bytes: &[u8]) -> f64 {
+    const WINDOW: usize = 64 << 10;
+    const WINDOWS: usize = 4;
+    if bytes.len() <= WINDOW * WINDOWS {
+        return f64::INFINITY; // small input: never gather
+    }
+    let span = bytes.len() - WINDOW;
+    let lines: usize = (0..WINDOWS)
+        .map(|i| count_newlines(&bytes[span / (WINDOWS - 1) * i..][..WINDOW]) + 1)
+        .sum();
+    lines as f64 * 20.0 / (WINDOW * WINDOWS) as f64
+}
+
+fn prefers_gather(bytes: &[u8]) -> bool {
+    bytes.len() >= GATHER_MIN_LEN && output_ratio(bytes) <= GATHER_MAX_OUTPUT_RATIO
+}
+
+/// Parses `bytes[start..end]` (a chunk starting at a line start) into fresh vectors.
+fn parse_chunk_local(bytes: &[u8], start: usize, end: usize, lines_hint: usize) -> (Vec<FlatNode>, Vec<u32>) {
+    let chunk = &bytes[start..end];
+    let mut nodes = Vec::with_capacity(lines_hint);
+    let mut offsets = Vec::with_capacity(lines_hint);
+    let mut positions = vec![0u32; TILE + FLATTEN_SLACK];
+    let mut line_start = 0usize;
+    for (t, tile) in chunk.chunks(TILE).enumerate() {
+        let n = flatten_newlines(tile, (t * TILE) as u32, &mut positions);
+        nodes.reserve(n);
+        offsets.reserve(n);
+        for &p in &positions[..n] {
+            let line_end = p as usize + 1;
+            let abs = (start + line_start) as u32;
+            offsets.push(abs);
+            nodes.push(parse_line(&chunk[line_start..line_end], abs));
+            line_start = line_end;
+        }
+    }
+    if line_start < chunk.len() {
+        let abs = (start + line_start) as u32;
+        offsets.push(abs);
+        nodes.push(parse_line(&chunk[line_start..], abs));
+    }
+    (nodes, offsets)
+}
+
+/// One pass over the text: every chunk parses into its own buffers, then the buffers are
+/// copied into the final arrays in parallel.
+fn build_gather<'a>(input: &'a str, chunks: &[(usize, usize)]) -> FlatTree<'a> {
+    use rayon::prelude::*;
+    let bytes = input.as_bytes();
+    let hint_per_byte = (output_ratio(bytes) / 20.0).min(1.0);
+
+    let parts: Vec<(Vec<FlatNode>, Vec<u32>)> = chunks
+        .par_iter()
+        .map(|&(s, e)| parse_chunk_local(bytes, s, e, ((e - s) as f64 * hint_per_byte * 1.1) as usize + 16))
+        .collect();
+    let total: usize = parts.iter().map(|(n, _)| n.len()).sum();
+
+    let mut nodes: Vec<FlatNode> = Vec::with_capacity(total);
+    let mut offsets: Vec<u32> = Vec::with_capacity(total);
+    let mut n_rest = nodes.spare_capacity_mut();
+    let mut o_rest = offsets.spare_capacity_mut();
+    let mut windows = Vec::with_capacity(parts.len());
+    for (n, _) in &parts {
+        let (n_head, n_tail) = n_rest.split_at_mut(n.len());
+        let (o_head, o_tail) = o_rest.split_at_mut(n.len());
+        windows.push((n_head, o_head));
+        n_rest = n_tail;
+        o_rest = o_tail;
+    }
+    parts.par_iter().zip(windows.into_par_iter()).for_each(|((n, o), (n_win, o_win))| {
+        // SAFETY: the windows are disjoint, `len` slots each, and `MaybeUninit<T>` has the
+        // layout of `T`; the sources are fully initialized vectors of the same length.
+        unsafe {
+            std::ptr::copy_nonoverlapping(n.as_ptr(), n_win.as_mut_ptr() as *mut FlatNode, n.len());
+            std::ptr::copy_nonoverlapping(o.as_ptr(), o_win.as_mut_ptr() as *mut u32, o.len());
+        }
+    });
+    // SAFETY: the windows tile `0..total` and were all written above.
+    unsafe {
+        nodes.set_len(total);
+        offsets.set_len(total);
+    }
+    FlatTree::new(input, nodes, offsets)
+}
+
 /// Single-threaded parser.
 pub fn try_parse(input: &str) -> Result<FlatTree<'_>, InputTooLarge> {
     check_input_len(input.len())?;
@@ -187,13 +293,26 @@ pub fn try_parse(input: &str) -> Result<FlatTree<'_>, InputTooLarge> {
 
 /// Multi-threaded parser (Rayon + AVX2). Falls back to [`try_parse`] for small inputs.
 pub fn try_parse_par(input: &str) -> Result<FlatTree<'_>, InputTooLarge> {
+    try_parse_par_with(input, ParStrategy::Auto)
+}
+
+/// [`try_parse_par`] with an explicit output strategy (for benchmarks and tests).
+pub fn try_parse_par_with(input: &str, strategy: ParStrategy) -> Result<FlatTree<'_>, InputTooLarge> {
     check_input_len(input.len())?;
     let threads = rayon::current_num_threads();
     if threads <= 1 || input.len() < PAR_THRESHOLD {
         return try_parse(input);
     }
     let chunks = partition_chunks(input.as_bytes(), threads * CHUNKS_PER_THREAD);
-    Ok(build(input, &chunks, chunks.len() > 1))
+    if chunks.len() <= 1 {
+        return Ok(build(input, &chunks, false));
+    }
+    let gather = match strategy {
+        ParStrategy::Auto => prefers_gather(input.as_bytes()),
+        ParStrategy::TwoPass => false,
+        ParStrategy::Gather => true,
+    };
+    Ok(if gather { build_gather(input, &chunks) } else { build(input, &chunks, true) })
 }
 
 /// Main entry point for the single-threaded CPU parser.
@@ -326,6 +445,42 @@ mod tests {
                 assert_matches_reference(&text);
             }
         }
+    }
+
+    #[test]
+    fn every_parallel_strategy_matches_reference() {
+        // Auto picks TwoPass on inputs this small, so force each strategy.
+        for strategy in [ParStrategy::TwoPass, ParStrategy::Gather, ParStrategy::Auto] {
+            for p in Profile::ALL {
+                let text = datagen::generate(p, 3 * 1024 * 1024, 41);
+                let (offs, nodes) = reference(&text);
+                let tree = try_parse_par_with(&text, strategy).unwrap();
+                assert_eq!(tree.line_offsets, offs, "{strategy:?} {p:?}: offsets");
+                assert_eq!(tree.nodes, nodes, "{strategy:?} {p:?}: nodes");
+            }
+            // Awkward shapes: no trailing newline, one giant line, CRLF only, all newlines.
+            for case in [
+                format!("{}\n|{}", "a".repeat(500_000), "b".repeat(300_000)),
+                "x\r\n".repeat(300_000),
+                "\n".repeat(400_000),
+                "|".repeat(1_000_000),
+                format!("{}tail without newline", "line\n".repeat(200_000)),
+            ] {
+                let (offs, nodes) = reference(&case);
+                let tree = try_parse_par_with(&case, strategy).unwrap();
+                assert_eq!(tree.line_offsets, offs, "{strategy:?} awkward: offsets");
+                assert_eq!(tree.nodes, nodes, "{strategy:?} awkward: nodes");
+            }
+        }
+    }
+
+    #[test]
+    fn auto_prefers_gather_only_for_large_inputs_with_long_lines() {
+        let long = datagen::generate(Profile::LongLines, 40 << 20, 1);
+        let short = datagen::generate(Profile::ShortLines, 40 << 20, 1);
+        assert!(prefers_gather(long.as_bytes()), "long lines: output is a tiny fraction of the text");
+        assert!(!prefers_gather(short.as_bytes()), "short lines: output is as large as the text");
+        assert!(!prefers_gather(datagen::generate(Profile::LongLines, 1 << 20, 1).as_bytes()), "too small");
     }
 
     #[test]
