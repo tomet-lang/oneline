@@ -37,7 +37,7 @@ measured regime, cold and warm. This is a finding to report, not a bug.
 - [ ] Find the ~1 ms query floor. Suspects: per-call buffer creation (`match_count`, indices, two staging
       buffers, bind group), zero-initialization of fresh buffers, `device.poll(wait)` latency.
 - [ ] Preallocate and reuse query buffers (e.g. in `GpuDocument` or a `QueryContext`); re-measure.
-- [ ] Measure pass 2 (hierarchical scan) against the old single-thread loop on a >1 GB input.
+- [~] Pass 2 at scale measured (0.19 ms at 121k blocks); not compared with the old single-thread loop.
 - [ ] Try `array<vec4<u32>>` loads in the scan kernels (never measured; was impossible on a software adapter).
 - [ ] Benchmark at 1 GB+ where CPU memory bandwidth (~60 GB/s) vs VRAM bandwidth should start to matter.
 - [ ] Revisit `phase2` only if the 4-byte readback shows up in the timestamps.
@@ -102,9 +102,9 @@ memory, not CPU threads.
 - [x] Host-side breakdown of `upload_text` (create / memcpy / unmap) and every pipeline step.
 - [x] Find the query floor (buffer creation, then readback size, then sort).
 - [x] Reuse query buffers; re-measure.
-- [ ] Measure pass 2 (hierarchical scan) against the old single-thread loop on a >1 GB input.
+- [~] Pass 2 at scale measured (0.19 ms at 121k blocks); not compared with the old single-thread loop.
 - [ ] Try `array<vec4<u32>>` loads in the scan kernels (pass 1 is already at ~340 GB/s, so expect little).
-- [ ] Benchmark at 1 GB+ (needs a PCIe/VRAM budget check; `max_storage_buffer_binding_size` applies).
+- [x] Benchmark at 1 GB+: see "Scaling to 1-2 GiB".
 - [x] Revisit `phase2`: the 4-byte count readback is ~0.05 ms of 20 ms (host steps "scan: wait..." is the DMA, not the sync). Stay on hold.
 - [ ] Open question: can the cold path overlap upload with scanning by streaming chunks? It can hide at most ~1 ms of
       compute, since the DMA and copies (~19 ms) dominate; probably not worth it.
@@ -114,3 +114,57 @@ memory, not CPU threads.
 The GPU's possible win is a query whose cost is proportional to the *text*, not to the node count. See the
 re-prioritization in `phase3-gpu-resident-query-engine.md`: substring search is the deciding experiment, now that
 the fixed per-query cost is ~260 us and the kernels are known to run at memory bandwidth.
+
+## Scaling to 1-2 GiB (2026-10-23)
+
+The 100-128 MB results above were taken where the CPU's working set partly fits cache. At 1 GiB and 1.85 GiB
+(HTML documentation from the nix store, 7.9M and 12.7M lines; same RTX 3060, PCIe Gen4 x16 per `nvidia-smi`):
+
+**The picture changes for warm queries: the CPU becomes DRAM-bound (~40 GB/s) and the GPU does not.**
+
+| warm query, 1 GiB, 7.9M lines | CPU, 12 threads | GPU resident | |
+|---|---|---|---|
+| structural filter, rare kind (3.7k hits) | 3.41 ms (count only 2.92 ms) | **0.76 ms** (kernel 435 us, ~276 GB/s of node reads) | GPU 4.5x |
+| substring search, rare pattern | 27 ms | 4.5-5.1 ms (210-240 GB/s) | GPU 5.4-6x |
+| substring search, rare pattern, 1.85 GiB | 50 ms | 6.7-7.8 ms (254-296 GB/s) | GPU 6.3-7.5x |
+
+So the earlier "parity" for kind/depth filters was a small-data artifact: at <=128 MB (nodes 20 MB) the CPU's
+parallel filter runs out of cache; at 1 GiB (nodes 120 MB) it reads DRAM and the GPU's ~10x bandwidth shows.
+Substring-search ratios (see `gpu-substring-search.md`) grow with size for the same reason.
+
+**Cold paths stay CPU-wins at every size** and scale linearly (~2.5 GB/s end to end for the GPU):
+
+| 1 GiB | CPU | GPU |
+|---|---|---|
+| parse (12 threads) | 64 ms (16.8 GB/s); single core 153 ms; tree links 21.7 ms | `parse_raw` 422 ms (2.5 GB/s) |
+| substring search from raw text | 27 ms | 434 ms (1.85 GiB: 771 ms) |
+
+### Upload at 1.85 GiB, host wall 741 ms (GPU execution 16.6 ms = 2.2%)
+
+| step | time |
+|---|---|
+| create mapped buffer (fresh 1.85 GiB of host memory) | 400 ms (54%) |
+| host memcpy into it | 106 ms (18 GB/s) |
+| wait for scan pass 1-2 (includes the staging -> VRAM DMA) | 225 ms (~8.4 GB/s of a Gen4 x16 link) |
+| GPU: scan pass 1 / 2 / 3 / parse | 6.1 ms (308 GB/s) / **0.19 ms** / 8.0 ms / 2.3 ms |
+
+- The hierarchical pass 2 handles 121k blocks in 0.19 ms (0.1% of the upload); it is not a bottleneck at this size.
+  (The old single-thread loop was not re-measured.)
+- The 400 ms is **not wgpu zero-filling**. Replacing `mapped_at_creation` with `queue.write_buffer_with` (which can
+  skip the zero fill) made a 1 GiB upload only 8% faster (362 -> 334 ms), so it was reverted: the cost is first-touch
+  page faults of newly mapped host memory. Reusing a persistent staging buffer would avoid it for repeated uploads,
+  not for a one-time resident upload.
+- The DMA runs at ~8.4 GB/s on a link that nvidia-smi reports as Gen4 x16 (~25 GB/s peak), so the end-to-end upload is
+  limited by the staging path, not by PCIe. A pinned-memory upload path was not tried (wgpu does not expose it).
+
+### Resources
+
+- Peak host memory: 3.5-3.9 GiB for a 1 GiB text; 6.3 GiB for the 1.85 GiB search benchmark (it holds the text, the
+  CPU/GPU results and the one-shot staging copy). Host RAM was 15 GiB.
+- VRAM budget 10.4 GiB; `maxStorageBufferRange` = 4 GiB - 1. The 4 GiB input limit (`MAX_GPU_INPUT_LEN`) could not be
+  exercised on this machine (not enough host RAM for a >4 GiB text plus copies), only unit-tested.
+
+### Steps from the original list
+
+- [x] Benchmark at 1 GB+ (done above).
+- [x] Pass 2 at scale: 0.19 ms at 121k blocks (the old loop was not compared).

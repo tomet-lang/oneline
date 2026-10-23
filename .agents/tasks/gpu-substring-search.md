@@ -5,7 +5,7 @@ Goal: decide whether the GPU can beat a strong CPU baseline on a query whose cos
 
 ## Result (RTX 3060, 100-128 MB, release build)
 
-**Yes, on resident text and sparse matches: ~4-5x faster than a 12-thread `memchr::memmem`. No, anywhere else.**
+**Yes, on resident text and sparse matches: 3.4-6.6x faster than a 12-thread `memchr::memmem` on five real corpora (4-5x on the synthetic data). Not when matches are dense, and never cold.**
 
 Warm = text already in RAM (CPU) / resident in VRAM (GPU). `prose` data, `cargo bench -p oneline-benches
 --bench comparison -- compare/search`, 128 MB:
@@ -42,6 +42,46 @@ Where it stops working:
 So the "GPU-resident query engine" thesis holds for exactly one shape of workload: a large corpus kept in
 VRAM and probed repeatedly with selective text searches. It does not hold for structural (kind/depth) filters
 (parity, see the profiling doc) nor for one-shot queries.
+
+
+## Real corpora (checked 2026-10-23): the synthetic result holds, and is a little better
+
+The synthetic `prose` data was the main caveat, so the same benchmark was run on text that exists on the
+development machine, ~210-260 MB each, read-only, concatenated and cut at 256 MiB (`head -c`):
+
+| corpus | built from |
+|---|---|
+| rust-src (208 MB) | every `.rs` file in the cargo registry |
+| c-headers (256 MB) | `*.h` files in the nix store (contains invalid UTF-8, converted lossily) |
+| html-docs (256 MB) | `*.html` in the nix store (markup-heavy documentation) |
+| text-docs (232 MB) | `*.txt` + `*.md` in the nix store (licenses, readmes; closest to natural language) |
+| json (256 MB) | `*.json` in the nix store (repetitive structured data) |
+
+Method: `oneline search FILE --bench` (median of 15). **Patterns are not hand-picked**: for each corpus the tool counts
+words in a ~16 MB sample and takes the word whose estimated number of hits in the whole text is closest to
+300 / 5,000 / 100,000 / 1,000,000, plus a 24-byte slice from the middle of the text. Both sides return every
+offset (or only the count). CPU = `memchr::memmem` on 12 threads with the text already in RAM; GPU = text resident
+in VRAM. Speedup = CPU time / GPU time.
+
+| hits (bytes per hit) | offsets back | count only |
+|---|---|---|
+| sparse, up to ~27k (>= 10 KB/hit), 14 patterns | **3.4x - 6.6x** (CPU 5.5-6.9 ms, GPU 0.8-1.8 ms) | **3.8x - 6.6x** |
+| medium, 55k - 190k (~1.4-4.4 KB/hit), 6 patterns | **1.8x - 3.7x** | **3.0x - 4.7x** |
+| dense, 570k - 1.1M (~245-470 B/hit), 4 patterns | **0.8x - 1.3x** (parity; CPU wins on 3 of 4) | **1.2x - 2.4x** |
+| cold: upload + search, any pattern | GPU 89-116 ms vs CPU 5.5-8 ms, i.e. **14-20x slower** | |
+
+Per-corpus detail (speedup, offsets / count): rust-src 6.6/6.6, 6.2/6.2, 2.2/3.7, 0.9/1.2 for 74, 1.9k, 125k, 864k hits;
+c-headers 6.3/6.4, 6.3/6.6, 5.1/5.5, 2.3/3.9 for 1, 643, 5.2k, 103k hits; html-docs 6.1/6.4, 4.0/3.9, 2.2/3.8, 1.3/2.4,
+0.8/1.5 for 104, 13k, 137k, 573k, 1.09M hits; text-docs 5.1/5.2, 6.4/5.9, 4.8/5.2, 3.7/4.7, 1.8/3.4 for 3, 2.2k, 6.9k,
+55k, 150k hits; json 6.3/6.6, 5.4/5.6, 3.4/3.8, 3.9/4.7, 1.9/3.0, 0.9/1.7 for 255, 674, 10k, 27k, 186k, 682k hits.
+
+What changed against the synthetic data: the *dense* case is less bad. Synthetic prose had a hit every ~120 bytes (the
+most frequent word of a Zipf vocabulary); the densest real patterns are one per 245-470 bytes, and there the GPU wins
+the count-only query (1.2-2.4x) instead of losing it. The ordering of regimes is the same: sparse >> medium >> dense,
+and cold is always CPU.
+
+Caveats that remain: all five corpora are code, markup or data plus some licence/readme text; there are no
+server logs and no large natural-language (e.g. Japanese) text here. A single machine (RTX 3060, 12 threads).
 
 ## What was built
 
@@ -97,6 +137,24 @@ Lessons worth keeping:
 - [ ] Case-insensitive / multi-pattern search would change the filter (and likely the economics).
 - [ ] The doc must stay resident: `GpuDocument` holds the text (and nodes) in VRAM. A text-only resident
       object would halve the memory for search-only use.
-- [ ] Real corpora. `prose` is synthetic (uniform letters, Zipf words). Run on actual logs/source/prose before
-      quoting the speedups outside this repo.
+- [x] Real corpora: done, see "Real corpora" above (five corpora, same ordering of regimes).
+- [ ] Still untested: server logs and large natural-language text (e.g. Japanese); other GPUs (one RTX 3060 only).
 - [ ] 1 GB+: only checked at 100-128 MB.
+
+## Scaling to 1-2 GiB (2026-10-23)
+
+Same benchmark on HTML documentation concatenated to 1 GiB and 1.85 GiB (median of 8 / 5 runs, text resident). The
+advantage **grows** with size because the CPU is DRAM-bound (~40 GB/s) while the kernel holds 210-296 GB/s:
+
+| text | hits (bytes/hit) | CPU 12 thr | GPU offsets / count | speedup |
+|---|---|---|---|---|
+| 1 GiB | 1.3k - 12k (>= 85 KB/hit) | 27 ms | 4.4-5.1 ms | 5.3-6.1x |
+| 1 GiB | 122k (8.8 KB/hit) | 27.6 ms | 6.3 / 4.9 ms | 4.4 / 5.6x |
+| 1.85 GiB | 16 - 3.2k | 50 ms | 6.7-7.8 ms | 6.3-7.5x |
+| 1.85 GiB | 196k (10 KB/hit) | 51 ms | 9.7 / 8.8 ms | 5.3 / 5.7x |
+| 1.85 GiB | 1.63M (1.2 KB/hit) | 54 ms | 24.5 / 17.0 ms | 2.2 / 3.1x |
+| 1.85 GiB | 5.0M (380 B/hit) | 70 / 54 ms | 55 / 36 ms | 1.3 / 1.5x |
+
+Cold (upload + search) remains 14-16x slower than the CPU (434 ms and 771 ms). Even the densest case (one hit per
+380 bytes, 5M hits) is still a GPU win here, consistent with the real-corpus finding that density, not size, is
+what erodes the advantage. The GPU result was checked against the CPU result (count and offsets) before each timing.
