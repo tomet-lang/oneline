@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use oneline_core::datagen::{self, Profile};
 use oneline_core::NodeKind;
 
-use super::{report, time_avg};
+use super::{report, time_median};
 
 pub(crate) fn parse_kind(k: &str) -> Option<NodeKind> {
     match k.to_lowercase().as_str() {
@@ -39,12 +39,12 @@ pub fn run_query(
 
         let one_shot = parser.query_raw(&content, node_kind, depth, 1024)?;
         println!("    filter: kind={node_kind:?} depth={depth:?}, {} sample matches", one_shot.len());
-        report("one-shot (upload + scan + fused filter)", bytes, time_avg(iters, || parser.query_raw(&content, node_kind, depth, 1024))?);
+        report("one-shot (upload + scan + fused filter)", bytes, time_median(iters, || parser.query_raw(&content, node_kind, depth, 1024))?);
 
         let doc = parser.upload(&content)?;
         let r = parser.query_document(&doc, node_kind, depth, 1024)?;
         println!("    resident: {} total matches", r.total_matches);
-        report("resident doc (VRAM only)", bytes, time_avg(iters, || parser.query_document(&doc, node_kind, depth, 1024))?);
+        report("resident doc (VRAM only)", bytes, time_median(iters, || parser.query_document(&doc, node_kind, depth, 1024))?);
     } else if let Some(file_path) = file {
         let content = std::fs::read_to_string(file_path)
             .with_context(|| format!("Failed to read file: {}", file_path.display()))?;

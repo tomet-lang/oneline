@@ -67,6 +67,10 @@ enum Commands {
         #[arg(long, default_value = "mixed")]
         profile: DataProfile,
 
+        /// Benchmark GPU vs CPU on FILE (patterns are picked from its own words unless given)
+        #[arg(long)]
+        bench: bool,
+
         /// Capacity for returned occurrence offsets
         #[arg(long, default_value_t = 1 << 20)]
         max_matches: usize,
@@ -161,8 +165,8 @@ pub fn run(cli: Cli) -> Result<()> {
         Commands::Bench { file, synthetic_mb, profile, iterations } => {
             bench::run_bench(file.as_deref(), synthetic_mb, profile.into(), iterations)
         }
-        Commands::Search { file, pattern, bench_mb, profile, max_matches, iterations } => {
-            search::run_search(file.as_deref(), &pattern, bench_mb, profile.into(), max_matches, iterations)
+        Commands::Search { file, pattern, bench_mb, profile, bench, max_matches, iterations } => {
+            search::run_search(file.as_deref(), &pattern, bench_mb, profile.into(), max_matches, bench, iterations)
         }
         Commands::Profile { file, synthetic_kb, profile, kind, max_matches, pattern, iterations } => {
             let kind = query::parse_kind(&kind).with_context(|| format!("unknown kind {kind:?}"))?;
@@ -174,17 +178,35 @@ pub fn run(cli: Cli) -> Result<()> {
     }
 }
 
-/// Average wall-clock time of `f` over `iterations` runs, after one warm-up.
-pub(crate) fn time_avg<R>(iterations: usize, mut f: impl FnMut() -> Result<R>) -> Result<Duration> {
+/// Median wall-clock time of `f` over `iterations` runs, after one warm-up. The median,
+/// not the mean: one scheduling hiccup (another process, a driver thread) can make a
+/// single run several times slower, and a mean would report it.
+pub(crate) fn time_median<R>(iterations: usize, mut f: impl FnMut() -> Result<R>) -> Result<Duration> {
     f()?;
-    let start = Instant::now();
-    for _ in 0..iterations {
+    let mut times = Vec::with_capacity(iterations.max(1));
+    for _ in 0..iterations.max(1) {
+        let start = Instant::now();
         std::hint::black_box(f()?);
+        times.push(start.elapsed());
     }
-    Ok(start.elapsed() / iterations.max(1) as u32)
+    times.sort();
+    Ok(times[times.len() / 2])
 }
 
 pub(crate) fn report(label: &str, bytes: usize, avg: Duration) {
     let gbps = (bytes as f64 / 1e9) / avg.as_secs_f64();
     println!("  {label:<46} {avg:>10.2?}  {gbps:>7.2} GB/s");
+}
+
+/// Prints the process's peak resident memory (Linux; silent elsewhere). Large-input
+/// runs need this: the text, parse results and the driver's staging copies add up.
+pub(crate) fn print_peak_rss() {
+    let Ok(status) = std::fs::read_to_string("/proc/self/status") else { return };
+    if let Some(kb) = status
+        .lines()
+        .find_map(|l| l.strip_prefix("VmHWM:"))
+        .and_then(|v| v.trim().trim_end_matches("kB").trim().parse::<f64>().ok())
+    {
+        println!("\npeak host memory: {:.2} GiB", kb / (1024.0 * 1024.0));
+    }
 }

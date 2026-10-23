@@ -21,7 +21,7 @@ use oneline_core::{FlatNode, FlatTree, InputTooLarge, check_input_len};
 
 pub use line::parse_line;
 pub use links::build_links;
-pub use scan::{count_newlines, for_each_newline};
+pub use scan::{FLATTEN_SLACK, count_newlines, flatten_newlines, for_each_newline};
 pub use search::{count_all_par, find_all, find_all_par, try_find_all_par};
 
 /// Inputs smaller than this are not worth splitting across threads.
@@ -63,6 +63,10 @@ pub fn scan_line_offsets(bytes: &[u8]) -> Vec<u32> {
     offsets
 }
 
+/// Bytes handled per tile: newline positions are listed for a tile, then its lines are
+/// classified while the tile is still in cache.
+const TILE: usize = 16 * 1024;
+
 /// Writes one `(offset, node)` per line of `bytes[start..end]` into the output slices.
 fn fill_chunk(
     bytes: &[u8],
@@ -80,11 +84,19 @@ fn fill_chunk(
         k += 1;
     };
 
+    // Two stages per tile, as in simdjson: list the newline positions without branching
+    // (the newline density is unpredictable, so a loop over mask bits mispredicts about
+    // once per line), then walk the list, which is a predictable loop.
+    let mut positions = vec![0u32; TILE + FLATTEN_SLACK];
     let mut line_start = 0usize;
-    for_each_newline(chunk, |p| {
-        emit(line_start, p + 1);
-        line_start = p + 1;
-    });
+    for (t, tile) in chunk.chunks(TILE).enumerate() {
+        let n = flatten_newlines(tile, (t * TILE) as u32, &mut positions);
+        for &p in &positions[..n] {
+            let line_end = p as usize + 1;
+            emit(line_start, line_end);
+            line_start = line_end;
+        }
+    }
     if line_start < chunk.len() {
         emit(line_start, chunk.len());
     }
