@@ -89,3 +89,34 @@ so the floor of this design is ~54 ms of the measured 68 ms. Making the per-line
 alphabet up to length 6 and on 300k random lines; `flatten_newlines` is checked against a naive scan at every
 alignment and density 0-100%. The CPU/GPU differential tests are unchanged, so a classification change cannot
 silently diverge from `shader.wgsl`.
+
+## Follow-up: one-pass `parse_par` ("gather"), done (2026-10-23)
+
+Idea 1 above, implemented as `ParStrategy::{Auto, TwoPass, Gather}` / `try_parse_par_with`. Gather parses each chunk once into
+its own buffers, then copies them into the final arrays in parallel; TwoPass is the previous count-then-fill. `Auto`
+(the default of `parse_par`) estimates the output (20 B per line) from four 64 KiB windows and gathers only for inputs of
+at least 32 MiB whose output is at most half the size of the text, i.e. average line length >= 40 bytes.
+
+12 threads, medians; the gain tracks "text read / output written":
+
+| data | two-pass | gather | |
+|---|---|---|---|
+| long-lines 100 MB (655 B/line) | 4.42 ms | 2.49 ms | -44% |
+| mixed 100 MB (80 B/line) | 6.77 ms | 5.01 ms | -26% |
+| nested 100 MB / prose 100 MB | 6.48 / 6.49 ms | 4.91 / 5.28 ms | -24% / -19% |
+| 1 GiB HTML (135 B/line) | 68.3 ms | 59.6 ms | **-13%** |
+| 1.85 GiB HTML (157 B/line) | 121.5 ms | 99.0 ms | **-19%** |
+| short-lines 100 MB (22 B/line) | 11.96 ms | 16.06 ms | **+34% (worse)** |
+| repeat 100 MB (15 B/line) | 14.1 ms | 21.0 ms | **+48% (worse)** |
+
+`Auto` matches the better of the two in every row above (the last two stay on TwoPass).
+
+The estimate for 1 GiB was 68 -> ~45 ms (-35%); the measured -13% is less than that. The cost not in the estimate is the
+extra output-sized buffer: its first-touch page faults and the gather copy. Where exactly was not measured. At 1 GiB
+the remaining ~59 ms is close to one DRAM read of the text (27 ms) plus the node writes and the copy.
+
+Tests: every strategy is checked against the naive reference on every data profile and on awkward shapes (no final
+newline, one giant line, CRLF only, all newlines); the heuristic has its own test (long lines -> gather, short lines /
+small input -> two-pass).
+
+Still open from the list above: non-temporal stores; `scan_line_offsets` still uses the old branchy loop.

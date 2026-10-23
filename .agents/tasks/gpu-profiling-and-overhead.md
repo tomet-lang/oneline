@@ -136,7 +136,7 @@ Substring-search ratios (see `gpu-substring-search.md`) grow with size for the s
 
 | 1 GiB | CPU | GPU |
 |---|---|---|
-| parse (12 threads) | 64 ms (16.8 GB/s); single core 153 ms; tree links 21.7 ms | `parse_raw` 422 ms (2.5 GB/s) |
+| parse (12 threads) | 64 ms (16.8 GB/s; 59 ms after the one-pass `parse_par`, see `parse-line-simd.md`); single core 153 ms (145 ms after the newline-listing change); tree links 21.7 ms | `parse_raw` 422 ms (2.5 GB/s) |
 | substring search from raw text | 27 ms | 434 ms (1.85 GiB: 771 ms) |
 
 ### Upload at 1.85 GiB, host wall 741 ms (GPU execution 16.6 ms = 2.2%)
