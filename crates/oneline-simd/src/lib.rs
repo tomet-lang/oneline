@@ -130,7 +130,57 @@ fn partition_chunks(bytes: &[u8], target: usize) -> Vec<(usize, usize)> {
     bounds.windows(2).map(|w| (w[0], w[1])).collect()
 }
 
-fn build<'a>(input: &'a str, chunks: &[(usize, usize)], parallel: bool) -> FlatTree<'a> {
+/// Output storage that survives between parses.
+///
+/// A parse of a large input allocates hundreds of megabytes (the result vectors, and for the
+/// gather strategy a second set of per-chunk vectors). Fresh memory is not free: the operating
+/// system hands it out page by page on first touch, which at 1 GiB of input was ~15 ms of a
+/// ~55 ms parse. Keeping the buffers lets the next parse write into memory that is already mapped.
+///
+/// ```
+/// # use oneline_simd::{ParseBuffers, try_parse_par_reusing};
+/// let mut buffers = ParseBuffers::new();
+/// for text in ["| a\n|| b\n", "| c\n"] {
+///     let tree = try_parse_par_reusing(text, &mut buffers).unwrap();
+///     assert!(!tree.nodes.is_empty());
+///     buffers.recycle(tree); // hand the vectors back for the next parse
+/// }
+/// ```
+#[derive(Default)]
+pub struct ParseBuffers {
+    /// Per-chunk vectors of the gather strategy.
+    parts: Vec<(Vec<FlatNode>, Vec<u32>)>,
+    /// Recycled result vectors (empty until a tree is handed back).
+    nodes: Vec<FlatNode>,
+    offsets: Vec<u32>,
+}
+
+impl ParseBuffers {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Takes back the vectors of a tree that is no longer needed so the next parse can fill them
+    /// instead of allocating. Their capacity is kept as it is: if the next input is much smaller the
+    /// memory stays reserved, so drop the `ParseBuffers` when you are done with them.
+    pub fn recycle(&mut self, tree: FlatTree<'_>) {
+        self.nodes = tree.nodes;
+        self.offsets = tree.line_offsets;
+    }
+
+    /// Result vectors with room for `total` entries, empty.
+    fn take_output(&mut self, total: usize) -> (Vec<FlatNode>, Vec<u32>) {
+        let mut nodes = std::mem::take(&mut self.nodes);
+        nodes.clear();
+        nodes.reserve(total);
+        let mut offsets = std::mem::take(&mut self.offsets);
+        offsets.clear();
+        offsets.reserve(total);
+        (nodes, offsets)
+    }
+}
+
+fn build<'a>(input: &'a str, chunks: &[(usize, usize)], parallel: bool, buffers: &mut ParseBuffers) -> FlatTree<'a> {
     let bytes = input.as_bytes();
 
     // Pass 1: count lines per chunk.
@@ -142,8 +192,7 @@ fn build<'a>(input: &'a str, chunks: &[(usize, usize)], parallel: bool) -> FlatT
     };
     let total: usize = counts.iter().sum();
 
-    let mut nodes: Vec<FlatNode> = Vec::with_capacity(total);
-    let mut offsets: Vec<u32> = Vec::with_capacity(total);
+    let (mut nodes, mut offsets) = buffers.take_output(total);
 
     // Hand every chunk its own disjoint output window.
     let mut n_rest = nodes.spare_capacity_mut();
@@ -220,11 +269,21 @@ fn prefers_gather(bytes: &[u8]) -> bool {
     bytes.len() >= GATHER_MIN_LEN && output_ratio(bytes) <= GATHER_MAX_OUTPUT_RATIO
 }
 
-/// Parses `bytes[start..end]` (a chunk starting at a line start) into fresh vectors.
-fn parse_chunk_local(bytes: &[u8], start: usize, end: usize, lines_hint: usize) -> (Vec<FlatNode>, Vec<u32>) {
+/// Parses `bytes[start..end]` (a chunk starting at a line start) into `nodes` / `offsets`, which are
+/// emptied first and keep their capacity.
+fn parse_chunk_into(
+    bytes: &[u8],
+    start: usize,
+    end: usize,
+    lines_hint: usize,
+    nodes: &mut Vec<FlatNode>,
+    offsets: &mut Vec<u32>,
+) {
+    nodes.clear();
+    offsets.clear();
+    nodes.reserve(lines_hint);
+    offsets.reserve(lines_hint);
     let chunk = &bytes[start..end];
-    let mut nodes = Vec::with_capacity(lines_hint);
-    let mut offsets = Vec::with_capacity(lines_hint);
     let mut positions = vec![0u32; TILE + FLATTEN_SLACK];
     let mut line_start = 0usize;
     for (t, tile) in chunk.chunks(TILE).enumerate() {
@@ -244,28 +303,32 @@ fn parse_chunk_local(bytes: &[u8], start: usize, end: usize, lines_hint: usize) 
         offsets.push(abs);
         nodes.push(parse_line(&chunk[line_start..], abs));
     }
-    (nodes, offsets)
 }
 
 /// One pass over the text: every chunk parses into its own buffers, then the buffers are
 /// copied into the final arrays in parallel.
-fn build_gather<'a>(input: &'a str, chunks: &[(usize, usize)]) -> FlatTree<'a> {
+fn build_gather<'a>(input: &'a str, chunks: &[(usize, usize)], buffers: &mut ParseBuffers) -> FlatTree<'a> {
     use rayon::prelude::*;
     let bytes = input.as_bytes();
     let hint_per_byte = (output_ratio(bytes) / 20.0).min(1.0);
 
-    let parts: Vec<(Vec<FlatNode>, Vec<u32>)> = chunks
-        .par_iter()
-        .map(|&(s, e)| parse_chunk_local(bytes, s, e, ((e - s) as f64 * hint_per_byte * 1.1) as usize + 16))
-        .collect();
-    let total: usize = parts.iter().map(|(n, _)| n.len()).sum();
+    if buffers.parts.len() < chunks.len() {
+        buffers.parts.resize_with(chunks.len(), Default::default);
+    }
+    buffers.parts[..chunks.len()]
+        .par_iter_mut()
+        .zip(chunks.par_iter())
+        .for_each(|((nodes, offsets), &(s, e))| {
+            parse_chunk_into(bytes, s, e, ((e - s) as f64 * hint_per_byte * 1.1) as usize + 16, nodes, offsets);
+        });
+    let total: usize = buffers.parts[..chunks.len()].iter().map(|(n, _)| n.len()).sum();
 
-    let mut nodes: Vec<FlatNode> = Vec::with_capacity(total);
-    let mut offsets: Vec<u32> = Vec::with_capacity(total);
+    let (mut nodes, mut offsets) = buffers.take_output(total);
+    let parts = &buffers.parts[..chunks.len()];
     let mut n_rest = nodes.spare_capacity_mut();
     let mut o_rest = offsets.spare_capacity_mut();
     let mut windows = Vec::with_capacity(parts.len());
-    for (n, _) in &parts {
+    for (n, _) in parts {
         let (n_head, n_tail) = n_rest.split_at_mut(n.len());
         let (o_head, o_tail) = o_rest.split_at_mut(n.len());
         windows.push((n_head, o_head));
@@ -295,6 +358,11 @@ fn build_gather<'a>(input: &'a str, chunks: &[(usize, usize)]) -> FlatTree<'a> {
 /// time, which at gigabyte sizes is a DRAM-bound pass of its own; below `GATHER_MIN_LEN` the text
 /// is cache-hot and counting is nearly free, and gives exact allocations.
 pub fn try_parse(input: &str) -> Result<FlatTree<'_>, InputTooLarge> {
+    try_parse_reusing(input, &mut ParseBuffers::new())
+}
+
+/// [`try_parse`] filling the vectors held by `buffers` (see [`ParseBuffers`]).
+pub fn try_parse_reusing<'a>(input: &'a str, buffers: &mut ParseBuffers) -> Result<FlatTree<'a>, InputTooLarge> {
     check_input_len(input.len())?;
     if input.is_empty() {
         return Ok(FlatTree::new(input, Vec::new(), Vec::new()));
@@ -304,10 +372,11 @@ pub fn try_parse(input: &str) -> Result<FlatTree<'_>, InputTooLarge> {
         let hint_per_byte = (output_ratio(bytes) / 20.0).min(1.0);
         // Generous: capacity that is reserved but never touched costs address space, not memory.
         let hint = (bytes.len() as f64 * hint_per_byte * 1.25) as usize + 16;
-        let (nodes, offsets) = parse_chunk_local(bytes, 0, bytes.len(), hint);
+        let (mut nodes, mut offsets) = buffers.take_output(hint);
+        parse_chunk_into(bytes, 0, bytes.len(), hint, &mut nodes, &mut offsets);
         return Ok(FlatTree::new(input, nodes, offsets));
     }
-    Ok(build(input, &[(0, input.len())], false))
+    Ok(build(input, &[(0, input.len())], false, buffers))
 }
 
 /// Multi-threaded parser (Rayon + AVX2). Falls back to [`try_parse`] for small inputs.
@@ -317,23 +386,36 @@ pub fn try_parse_par(input: &str) -> Result<FlatTree<'_>, InputTooLarge> {
 
 /// [`try_parse_par`] with an explicit output strategy (for benchmarks and tests).
 pub fn try_parse_par_with(input: &str, strategy: ParStrategy) -> Result<FlatTree<'_>, InputTooLarge> {
+    try_parse_par_with_buffers(input, strategy, &mut ParseBuffers::new())
+}
+
+/// [`try_parse_par`] filling the buffers held by `buffers` (see [`ParseBuffers`]).
+pub fn try_parse_par_reusing<'a>(input: &'a str, buffers: &mut ParseBuffers) -> Result<FlatTree<'a>, InputTooLarge> {
+    try_parse_par_with_buffers(input, ParStrategy::Auto, buffers)
+}
+
+/// The general entry point: explicit strategy and reusable buffers.
+pub fn try_parse_par_with_buffers<'a>(
+    input: &'a str,
+    strategy: ParStrategy,
+    buffers: &mut ParseBuffers,
+) -> Result<FlatTree<'a>, InputTooLarge> {
     check_input_len(input.len())?;
     let threads = rayon::current_num_threads();
     if threads <= 1 || input.len() < PAR_THRESHOLD {
-        return try_parse(input);
+        return try_parse_reusing(input, buffers);
     }
     let chunks = partition_chunks(input.as_bytes(), threads * CHUNKS_PER_THREAD);
     if chunks.len() <= 1 {
-        return Ok(build(input, &chunks, false));
+        return Ok(build(input, &chunks, false, buffers));
     }
     let gather = match strategy {
         ParStrategy::Auto => prefers_gather(input.as_bytes()),
         ParStrategy::TwoPass => false,
         ParStrategy::Gather => true,
     };
-    Ok(if gather { build_gather(input, &chunks) } else { build(input, &chunks, true) })
+    Ok(if gather { build_gather(input, &chunks, buffers) } else { build(input, &chunks, true, buffers) })
 }
-
 /// Main entry point for the single-threaded CPU parser.
 ///
 /// # Panics
@@ -491,6 +573,59 @@ mod tests {
                 assert_eq!(tree.nodes, nodes, "{strategy:?} awkward: nodes");
             }
         }
+    }
+
+    #[test]
+    fn reused_buffers_give_the_same_trees_in_any_order() {
+        // One ParseBuffers across inputs that grow, shrink, vanish and change shape: stale
+        // contents or a stale length from an earlier parse must never show through.
+        let mut inputs: Vec<String> = Vec::new();
+        for (p, size) in [(Profile::Mixed, 3 << 20), (Profile::ShortLines, 600 << 10), (Profile::LongLines, 5 << 20), (Profile::Nested, 300 << 10)] {
+            inputs.push(datagen::generate(p, size, 17));
+        }
+        inputs.push(String::new());
+        inputs.push("| tiny\n".to_string());
+        inputs.push("\n".repeat(400_000));
+        inputs.push(format!("{}tail", "line\n".repeat(100_000)));
+        let order = [0, 1, 2, 3, 4, 5, 6, 2, 7, 0, 5, 1];
+
+        for strategy in [ParStrategy::TwoPass, ParStrategy::Gather, ParStrategy::Auto] {
+            let mut buffers = ParseBuffers::new();
+            for &i in &order {
+                let text = &inputs[i];
+                let (offs, nodes) = reference(text);
+                let tree = try_parse_par_with_buffers(text, strategy, &mut buffers).unwrap();
+                assert_eq!(tree.line_offsets, offs, "{strategy:?} input {i}: offsets");
+                assert_eq!(tree.nodes, nodes, "{strategy:?} input {i}: nodes");
+                buffers.recycle(tree);
+            }
+        }
+        // The single-threaded entry point shares the buffers too.
+        let mut buffers = ParseBuffers::new();
+        for &i in &order {
+            let text = &inputs[i];
+            let (offs, nodes) = reference(text);
+            let tree = try_parse_reusing(text, &mut buffers).unwrap();
+            assert_eq!(tree.line_offsets, offs, "single input {i}: offsets");
+            assert_eq!(tree.nodes, nodes, "single input {i}: nodes");
+            buffers.recycle(tree);
+        }
+    }
+
+    #[test]
+    fn reused_buffers_keep_their_allocations() {
+        // The point of reuse: after warm-up, a same-sized parse writes into the same memory.
+        let text = datagen::generate(Profile::LongLines, 4 << 20, 5);
+        let mut buffers = ParseBuffers::new();
+        let tree = try_parse_par_with_buffers(&text, ParStrategy::Gather, &mut buffers).unwrap();
+        let (nodes_ptr, offsets_ptr) = (tree.nodes.as_ptr(), tree.line_offsets.as_ptr());
+        buffers.recycle(tree);
+        let parts_ptrs: Vec<*const FlatNode> = buffers.parts.iter().map(|(n, _)| n.as_ptr()).collect();
+        let again = try_parse_par_with_buffers(&text, ParStrategy::Gather, &mut buffers).unwrap();
+        assert_eq!(again.nodes.as_ptr(), nodes_ptr, "result nodes were reallocated");
+        assert_eq!(again.line_offsets.as_ptr(), offsets_ptr, "result offsets were reallocated");
+        let after: Vec<*const FlatNode> = buffers.parts.iter().map(|(n, _)| n.as_ptr()).collect();
+        assert_eq!(after, parts_ptrs, "per-chunk buffers were reallocated");
     }
 
     #[test]

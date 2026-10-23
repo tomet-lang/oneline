@@ -36,6 +36,29 @@ pub fn run_bench(file: Option<&Path>, synthetic_mb: usize, profile: Profile, ite
         bytes,
         time_median(iterations, || Ok(oneline_simd::try_parse_par(&content)?.nodes.len()))?,
     );
+    // Same parses, but handing the result vectors back each time: no fresh pages to fault in.
+    let mut buffers = oneline_simd::ParseBuffers::new();
+    report(
+        "parse, single core, reusing buffers",
+        bytes,
+        time_median(iterations, || {
+            let tree = oneline_simd::try_parse_reusing(&content, &mut buffers)?;
+            let n = tree.nodes.len();
+            buffers.recycle(tree);
+            Ok(n)
+        })?,
+    );
+    let mut buffers = oneline_simd::ParseBuffers::new();
+    report(
+        &format!("parse, {} threads, reusing buffers", rayon::current_num_threads()),
+        bytes,
+        time_median(iterations, || {
+            let tree = oneline_simd::try_parse_par_reusing(&content, &mut buffers)?;
+            let n = tree.nodes.len();
+            buffers.recycle(tree);
+            Ok(n)
+        })?,
+    );
     let tree = oneline_simd::try_parse_par(&content)?;
     report("tree links (parent + subtree end), parallel", bytes, time_median(iterations, || Ok(oneline_simd::build_links(&tree.nodes)))?);
 
