@@ -210,6 +210,12 @@ fn output_ratio(bytes: &[u8]) -> f64 {
     lines as f64 * 20.0 / (WINDOW * WINDOWS) as f64
 }
 
+/// Single-threaded one-pass parse: no gather copy to pay, so it wins whenever the second read of
+/// the text is not free, i.e. beyond the cache.
+fn prefers_one_pass_single(bytes: &[u8]) -> bool {
+    bytes.len() >= GATHER_MIN_LEN
+}
+
 fn prefers_gather(bytes: &[u8]) -> bool {
     bytes.len() >= GATHER_MIN_LEN && output_ratio(bytes) <= GATHER_MAX_OUTPUT_RATIO
 }
@@ -283,10 +289,23 @@ fn build_gather<'a>(input: &'a str, chunks: &[(usize, usize)]) -> FlatTree<'a> {
 }
 
 /// Single-threaded parser.
+///
+/// Large inputs are parsed in one pass straight into the result vectors (sized from a sample of the
+/// text, growing if the estimate was low). Counting the lines first would read the text a second
+/// time, which at gigabyte sizes is a DRAM-bound pass of its own; below `GATHER_MIN_LEN` the text
+/// is cache-hot and counting is nearly free, and gives exact allocations.
 pub fn try_parse(input: &str) -> Result<FlatTree<'_>, InputTooLarge> {
     check_input_len(input.len())?;
     if input.is_empty() {
         return Ok(FlatTree::new(input, Vec::new(), Vec::new()));
+    }
+    let bytes = input.as_bytes();
+    if prefers_one_pass_single(bytes) {
+        let hint_per_byte = (output_ratio(bytes) / 20.0).min(1.0);
+        // Generous: capacity that is reserved but never touched costs address space, not memory.
+        let hint = (bytes.len() as f64 * hint_per_byte * 1.25) as usize + 16;
+        let (nodes, offsets) = parse_chunk_local(bytes, 0, bytes.len(), hint);
+        return Ok(FlatTree::new(input, nodes, offsets));
     }
     Ok(build(input, &[(0, input.len())], false))
 }
@@ -481,6 +500,34 @@ mod tests {
         assert!(prefers_gather(long.as_bytes()), "long lines: output is a tiny fraction of the text");
         assert!(!prefers_gather(short.as_bytes()), "short lines: output is as large as the text");
         assert!(!prefers_gather(datagen::generate(Profile::LongLines, 1 << 20, 1).as_bytes()), "too small");
+    }
+
+    #[test]
+    fn single_core_one_pass_matches_reference_on_large_inputs() {
+        // At least GATHER_MIN_LEN, so `parse` takes the one-pass path.
+        for p in [Profile::LongLines, Profile::Mixed] {
+            let text = datagen::generate(p, 34 << 20, 7);
+            assert!(prefers_one_pass_single(text.as_bytes()));
+            let (offs, nodes) = reference(&text);
+            let tree = parse(&text);
+            assert_eq!(tree.line_offsets, offs, "{p:?}: offsets");
+            assert_eq!(tree.nodes, nodes, "{p:?}: nodes");
+        }
+        // A sample that badly under-estimates the line count (a block of empty lines sits between
+        // the sampled windows), so the vectors must grow: the result still has to be exact.
+        // The sample windows sit at 0, ~1/3, ~2/3 and the end of the text; the empty lines go between the
+        // first two, so the sample sees none of them.
+        let mut text = "x".repeat(2 << 20);
+        text.push_str(&"\n".repeat(6 << 20));
+        text.push_str(&"y".repeat(30 << 20));
+        text.push_str("\ntail");
+        let actual_lines = text.bytes().filter(|&b| b == b'\n').count() + 1;
+        let estimated = (output_ratio(text.as_bytes()) / 20.0 * text.len() as f64) as usize;
+        assert!(estimated * 10 < actual_lines, "the sample must under-estimate for this test to mean anything: {estimated} vs {actual_lines}");
+        let (offs, nodes) = reference(&text);
+        let tree = parse(&text);
+        assert_eq!(tree.line_offsets, offs, "growth: offsets");
+        assert_eq!(tree.nodes, nodes, "growth: nodes");
     }
 
     #[test]
