@@ -20,10 +20,14 @@ pub enum Profile {
     /// words (and therefore pattern prefixes) are far less repetitive than in the
     /// 23-word `Mixed` vocabulary. The realistic case for substring search.
     Prose,
+    /// Like `Mixed`, but cut into sections by top-level headings whose lengths are
+    /// log-uniform between 10 and 1,000,000 lines, with everything else nested under
+    /// them: subtree sizes span five orders of magnitude (for subtree queries).
+    Nested,
 }
 
 impl Profile {
-    pub const ALL: [Profile; 5] = [Self::Repeat, Self::ShortLines, Self::Mixed, Self::LongLines, Self::Prose];
+    pub const ALL: [Profile; 6] = [Self::Repeat, Self::ShortLines, Self::Mixed, Self::LongLines, Self::Prose, Self::Nested];
 
     pub const fn name(self) -> &'static str {
         match self {
@@ -32,6 +36,7 @@ impl Profile {
             Self::Mixed => "mixed",
             Self::LongLines => "long-lines",
             Self::Prose => "prose",
+            Self::Nested => "nested",
         }
     }
 }
@@ -135,6 +140,9 @@ pub fn generate(profile: Profile, target_bytes: usize, seed: u64) -> String {
     }
 
     let vocab = (profile == Profile::Prose).then(prose_vocabulary);
+    // Lines left before the next top-level section heading (Nested only).
+    let mut until_heading = 0u64;
+    let mut section = 0u64;
     let mut depth = 1u32;
     while out.len() < target_bytes {
         // Depth follows a random walk, so subtrees open and close realistically.
@@ -143,6 +151,19 @@ pub fn generate(profile: Profile, target_bytes: usize, seed: u64) -> String {
             2..=3 if depth < 7 => depth += 1,
             4 if rng.chance(2) => depth = rng.below(3) as u32,
             _ => {}
+        }
+
+        if profile == Profile::Nested {
+            if until_heading == 0 {
+                section += 1;
+                out.push_str(&format!("=[ Section {section} ]"));
+                eol(&mut out, &mut rng, 0);
+                // Log-uniform section length, 10 .. 1,000,000 lines.
+                until_heading = 10f64.powf(1.0 + 5.0 * (rng.below(1 << 20) as f64 / (1u64 << 20) as f64)) as u64;
+                continue;
+            }
+            until_heading -= 1;
+            depth = depth.max(1);
         }
 
         let body_len = match profile {

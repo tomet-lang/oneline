@@ -6,7 +6,7 @@
 //! * `cold/*`   — raw text in, matching line indices out
 //! * `warm/*`   — document already parsed and resident, many queries in a row
 //!
-//! `search` repeats the cold/warm split for substring search.
+//! `search` repeats the cold/warm split for substring search; `tree` compares tree construction.
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use oneline_core::datagen::{self, Profile};
@@ -118,5 +118,31 @@ fn search(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, cold_and_warm, search);
+
+/// Tree links (parent + subtree end) on `nested` documents: CPU parallel ANSV over the
+/// parsed nodes vs the GPU kernels over the nodes resident in VRAM. Each GPU iteration
+/// includes allocating its working buffers.
+fn tree(c: &mut Criterion) {
+    let gpu = gpu();
+    for size in [16 * MB, 128 * MB] {
+        let text = dataset(Profile::Nested, size);
+        let parsed = oneline_simd::parse_par(&text);
+        let doc = gpu.as_ref().map(|p| p.upload(&text).unwrap());
+        let mut g = c.benchmark_group("compare/tree");
+        configure(&mut g, size);
+        g.throughput(Throughput::Bytes(text.len() as u64));
+        let id = size_label(size);
+        g.bench_function(BenchmarkId::new("cpu_build_links", &id), |b| {
+            b.iter_with_large_drop(|| oneline_simd::build_links(&parsed.nodes))
+        });
+        if let (Some(p), Some(d)) = (&gpu, &doc) {
+            g.bench_function(BenchmarkId::new("gpu_build_tree", &id), |b| {
+                b.iter_with_large_drop(|| p.build_tree(d).unwrap())
+            });
+        }
+        g.finish();
+    }
+}
+
+criterion_group!(benches, cold_and_warm, search, tree);
 criterion_main!(benches);

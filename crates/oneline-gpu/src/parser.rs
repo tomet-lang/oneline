@@ -30,6 +30,10 @@ pub struct GpuParser {
     /// Substring search (`search.wgsl`): group 0 is just the text; group 1 reuses `query_layout`.
     pub(crate) search_pipeline: wgpu::ComputePipeline,
     pub(crate) text_layout: wgpu::BindGroupLayout,
+    /// Tree construction (`tree.wgsl`).
+    pub(crate) tree: crate::tree::TreePipelines,
+    pub(crate) tree_layout0: wgpu::BindGroupLayout,
+    pub(crate) tree_layout1: wgpu::BindGroupLayout,
 
     // Stage 1 prefix-scan pipelines (`scan.wgsl`).
     pub(crate) scan_count_pipeline: wgpu::ComputePipeline,
@@ -170,6 +174,36 @@ impl GpuParser {
         let text_layout = bind_layout(&device, "Search Text Bind Group Layout", &[storage_entry(0, true)]);
         let search_pipeline = pipeline(&device, "Search", &search_shader, "search", &[&text_layout, &query_layout]);
 
+
+        // Tree construction.
+        let tree_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Oneline Tree Compute Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("tree.wgsl").into()),
+        });
+        let tree_layout0 = bind_layout(
+            &device,
+            "Tree Bind Group Layout 0",
+            &[
+                storage_entry(0, true),  // nodes
+                uniform_entry(1),        // config
+                storage_entry(2, false), // run summaries
+                storage_entry(3, false), // run start states
+                storage_entry(4, false), // status
+                storage_entry(5, false), // keys
+            ],
+        );
+        let tree_layout1 = bind_layout(&device, "Tree Bind Group Layout 1", &[storage_entry(0, false)]);
+        let tree_pipeline = |label: &str, entry: &str| pipeline(&device, label, &tree_shader, entry, &[&tree_layout0, &tree_layout1]);
+        let tree = crate::tree::TreePipelines {
+            extract_keys: tree_pipeline("Tree Extract Keys", "extract_keys"),
+            summarize_forward: tree_pipeline("Tree Summarize Forward", "summarize_forward"),
+            scan_forward: tree_pipeline("Tree Scan Forward", "scan_forward"),
+            assign_parent: tree_pipeline("Tree Assign Parent", "assign_parent"),
+            summarize_backward: tree_pipeline("Tree Summarize Backward", "summarize_backward"),
+            scan_backward: tree_pipeline("Tree Scan Backward", "scan_backward"),
+            assign_end: tree_pipeline("Tree Assign End", "assign_end"),
+        };
+
         // Stage 1: line-offset prefix scan.
         let scan_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Oneline Scan Compute Shader"),
@@ -216,6 +250,9 @@ impl GpuParser {
             query_layout,
             search_pipeline,
             text_layout,
+            tree,
+            tree_layout0,
+            tree_layout1,
             scan_count_pipeline,
             scan_blocks_pipeline,
             scan_scatter_pipeline,

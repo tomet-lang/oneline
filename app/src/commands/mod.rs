@@ -145,6 +145,7 @@ pub(crate) enum DataProfile {
     Mixed,
     LongLines,
     Prose,
+    Nested,
 }
 
 impl From<DataProfile> for Profile {
@@ -155,6 +156,7 @@ impl From<DataProfile> for Profile {
             DataProfile::Mixed => Profile::Mixed,
             DataProfile::LongLines => Profile::LongLines,
             DataProfile::Prose => Profile::Prose,
+            DataProfile::Nested => Profile::Nested,
         }
     }
 }

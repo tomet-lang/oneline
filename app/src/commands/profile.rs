@@ -6,6 +6,8 @@ use oneline_core::NodeKind;
 use oneline_core::datagen::{self, Profile};
 use oneline_gpu::GpuParser;
 
+use super::time_median;
+
 /// Median per step over `runs`; every run executes the same steps in the same order.
 fn median_steps(runs: &[Vec<(&'static str, Duration)>]) -> Vec<(&'static str, Duration)> {
     let n = runs.first().map_or(0, |r| r.len());
@@ -45,6 +47,68 @@ fn print_profile(title: &str, profiles: &[oneline_gpu::Profile]) {
     } else {
         println!("  GPU passes: not available (adapter lacks TIMESTAMP_QUERY)");
     }
+}
+
+
+/// GPU tree construction and subtree queries on the resident document, next to the CPU.
+fn profile_tree(parser: &GpuParser, doc: &oneline_gpu::GpuDocument, content: &str, kind: Option<NodeKind>, iterations: usize) -> Result<()> {
+    if let Err(e) = parser.build_tree(doc) {
+        println!("\nTREE: not available for this document: {e}");
+        return Ok(());
+    }
+    let mut profiles = Vec::new();
+    for _ in 0..iterations {
+        profiles.push(parser.profile_build_tree(doc)?);
+    }
+    print_profile("BUILD TREE on resident document (parent + subtree_end)", &profiles);
+
+    // The same relations on the CPU, nodes already parsed (parallel ANSV).
+    let cpu_tree = oneline_simd::try_parse_par(content)?;
+    let cpu = time_median(iterations, || Ok(oneline_simd::build_links(&cpu_tree.nodes)))?;
+    println!("  CPU build_links (parallel, nodes already parsed)       {cpu:>10.2?}");
+
+    // Subtree queries: pick roots whose subtrees span several orders of magnitude.
+    let links = oneline_simd::build_links(&cpu_tree.nodes);
+    let tree = parser.build_tree(doc)?;
+    let n = cpu_tree.nodes.len();
+    let size = |i: usize| links.subtree(i).len();
+    // For each target size, the line whose subtree is closest to it (log scale). A full scan:
+    // headings with big subtrees are rare, so sampling lines would miss them.
+    let targets = [10usize, 1_000, 100_000, 1_000_000];
+    let mut best: Vec<Option<(usize, f64)>> = vec![None; targets.len()];
+    for i in 0..n {
+        let s = size(i);
+        if s <= 1 {
+            continue;
+        }
+        for (slot, &target) in best.iter_mut().zip(&targets) {
+            let d = ((s as f64).ln() - (target as f64).ln()).abs();
+            if slot.is_none_or(|(_, bd)| d < bd) {
+                *slot = Some((i, d));
+            }
+        }
+    }
+    let mut roots: Vec<(usize, usize)> = Vec::new();
+    for (i, _) in best.into_iter().flatten() {
+        if !roots.iter().any(|&(r, _)| r == i) {
+            roots.push((i, size(i)));
+        }
+    }
+    roots.sort_by_key(|&(_, s)| s);
+    println!("\n  subtree query (kind filter), GPU resident vs CPU range filter");
+    println!("    {:>13} {:>10} {:>12} {:>12}", "subtree lines", "GPU", "CPU (1 thr)", "CPU (12 thr)");
+    for (root, lines) in roots {
+        let g = time_median(iterations, || Ok(parser.query_subtree(doc, &tree, root, kind, None, 1024)?.total_matches))?;
+        let c = time_median(iterations, || {
+            Ok(links.subtree(root).filter(|&i| kind.is_none_or(|k| cpu_tree.nodes[i].kind() == k)).count())
+        })?;
+        let cp = time_median(iterations, || {
+            use rayon::prelude::*;
+            Ok((root..root + lines).into_par_iter().filter(|&i| kind.is_none_or(|k| cpu_tree.nodes[i].kind() == k)).count())
+        })?;
+        println!("    {lines:>13} {g:>10.2?} {c:>12.2?} {cp:>12.2?}");
+    }
+    Ok(())
 }
 
 pub fn run_profile(
@@ -100,5 +164,6 @@ pub fn run_profile(
     print_profile("UPLOAD (resident): upload + scan + parse", &uploads);
     print_profile("QUERY on resident document", &resident);
     print_profile("QUERY one-shot (fused): upload + scan + filter", &one_shot);
+    profile_tree(&parser, &doc, &content, kind, iterations)?;
     Ok(())
 }

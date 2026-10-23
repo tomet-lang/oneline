@@ -308,3 +308,140 @@ fn search_rejects_window_hits_that_imply_a_start_before_the_text() {
     let doc = parser.upload(&text).unwrap();
     assert_eq!(parser.search_document(&doc, &pattern, 16).unwrap().total_matches, 0);
 }
+
+// ---- tree construction ------------------------------------------------------
+
+use oneline_core::TreeLinks;
+
+/// A document with one line per `(depth, blank)`: blank lines are empty or prefix-only.
+fn text_from_depths(lines: &[(u32, bool)]) -> String {
+    let mut text = String::new();
+    for (i, &(depth, blank)) in lines.iter().enumerate() {
+        text.push_str(&"|".repeat(depth as usize));
+        if blank {
+            // Alternate empty and prefix-only blanks: neither belongs to the tree.
+            if i % 2 == 0 {
+                text.truncate(text.len() - depth as usize);
+            }
+        } else {
+            text.push_str(" x");
+        }
+        text.push('\n');
+    }
+    text
+}
+
+fn gpu_links(parser: &GpuParser, text: &str) -> TreeLinks {
+    let doc = parser.upload(text).unwrap();
+    let tree = parser.build_tree(&doc).unwrap();
+    assert_eq!(tree.line_count(), doc.line_count());
+    parser.download_links(&tree).unwrap()
+}
+
+fn assert_tree_matches_cpu(parser: &GpuParser, text: &str, what: &str) {
+    let cpu = oneline_simd::build_links(&oneline_simd::parse(text).nodes);
+    let gpu = gpu_links(parser, text);
+    assert_eq!(gpu.parent.len(), cpu.parent.len(), "{what}: line count");
+    if let Some(i) = (0..cpu.parent.len()).find(|&i| gpu.parent[i] != cpu.parent[i]) {
+        panic!("{what}: parent differs at line {i}: gpu {} cpu {}", gpu.parent[i], cpu.parent[i]);
+    }
+    if let Some(i) = (0..cpu.subtree_end.len()).find(|&i| gpu.subtree_end[i] != cpu.subtree_end[i]) {
+        panic!("{what}: subtree_end differs at line {i}: gpu {} cpu {}", gpu.subtree_end[i], cpu.subtree_end[i]);
+    }
+}
+
+#[test]
+fn gpu_tree_matches_cpu_on_generated_documents() {
+    let parser = gpu!();
+    for p in Profile::ALL {
+        let text = datagen::generate(p, 3 << 20, 21);
+        assert_tree_matches_cpu(&parser, &text, p.name());
+    }
+}
+
+/// A thread owns a run of 32 lines and a workgroup 2048: exercise sizes around both boundaries.
+#[test]
+fn gpu_tree_handles_run_boundaries() {
+    let parser = gpu!();
+    let mut rng = datagen::Rng::new(5);
+    for n in [1usize, 2, 31, 32, 33, 255, 256, 257, 1000, 2047, 2048, 2049, 4095, 4096, 4097, 6145] {
+        let lines: Vec<(u32, bool)> = (0..n).map(|_| (rng.below(5) as u32, rng.chance(15))).collect();
+        assert_tree_matches_cpu(&parser, &text_from_depths(&lines), &format!("{n} random lines"));
+    }
+}
+
+/// Shapes where the nearest smaller line is far away, many runs back, or never exists.
+#[test]
+fn gpu_tree_handles_adversarial_shapes() {
+    let parser = gpu!();
+    let n = 256 * 40 + 77;
+    let shapes: Vec<(&str, Vec<(u32, bool)>)> = vec![
+        ("flat depth 1", vec![(1, false); n]),
+        ("flat depth 0", vec![(0, false); n]),
+        ("header then flat", std::iter::once((0, false)).chain(std::iter::repeat_n((1, false), n - 1)).collect()),
+        ("flat then header at the end", std::iter::repeat_n((1, false), n - 1).chain(std::iter::once((0, false))).collect()),
+        ("strictly increasing to the limit", (0..n as u32).map(|i| (i % 32, false)).collect()),
+        ("strictly decreasing sawtooth", (0..n as u32).map(|i| (31 - i % 32, false)).collect()),
+        ("alternating", (0..n as u32).map(|i| (i % 2, false)).collect()),
+        ("only blanks", vec![(3, true); n]),
+        ("blanks between levels", (0..n as u32).map(|i| (i % 4, i % 3 == 0)).collect()),
+        ("deepest allowed", vec![(31, false); n]),
+    ];
+    for (name, lines) in shapes {
+        assert_tree_matches_cpu(&parser, &text_from_depths(&lines), name);
+    }
+}
+
+#[test]
+fn gpu_tree_refuses_what_it_cannot_represent_and_stays_usable() {
+    let parser = gpu!();
+    // 31 levels is the deepest the kernels track; 32 must be an error, not a wrong tree.
+    let deepest = parser.upload(&format!("{} x\n", "|".repeat(31))).unwrap();
+    assert!(parser.build_tree(&deepest).is_ok());
+    let too_deep = parser.upload(&format!("| a\n{} x\n| b\n", "|".repeat(32))).unwrap();
+    let err = parser.build_tree(&too_deep).err().expect("depth 32 must be rejected");
+    assert!(err.to_string().contains("32"), "{err}");
+    // A blank line that is "deep" is not part of the tree and is fine.
+    let blank_deep = parser.upload(&format!("| a\n{}\n| b\n", "|".repeat(40))).unwrap();
+    assert!(parser.build_tree(&blank_deep).is_ok());
+    // And the parser is still usable afterwards.
+    assert_tree_matches_cpu(&parser, "| a\n|| b\n| c\n", "after an error");
+}
+
+#[test]
+fn gpu_tree_of_an_empty_document() {
+    let parser = gpu!();
+    let doc = parser.upload("").unwrap();
+    let tree = parser.build_tree(&doc).unwrap();
+    assert_eq!(tree.line_count(), 0);
+    assert!(parser.download_links(&tree).unwrap().parent.is_empty());
+}
+
+/// Subtree queries return exactly the CPU's subtree range filtered by kind/depth.
+#[test]
+fn gpu_subtree_query_matches_cpu() {
+    let parser = gpu!();
+    let text = datagen::generate(Profile::Mixed, 2 << 20, 33);
+    let cpu = oneline_simd::parse(&text);
+    let links = oneline_simd::build_links(&cpu.nodes);
+    let doc = parser.upload(&text).unwrap();
+    let tree = parser.build_tree(&doc).unwrap();
+
+    let all = cpu.nodes.len();
+    let mut checked = 0;
+    for root in (0..all).step_by(all / 40 + 1) {
+        for (kind, depth) in [(None, None), (Some(NodeKind::Text), None), (Some(NodeKind::List), Some(2)), (None, Some(3))] {
+            let want: Vec<u32> = links
+                .subtree(root)
+                .filter(|&i| kind.is_none_or(|k| cpu.nodes[i].kind() == k) && depth.is_none_or(|d| cpu.nodes[i].depth == d))
+                .map(|i| i as u32)
+                .collect();
+            let got = parser.query_subtree(&doc, &tree, root, kind, depth, all).unwrap();
+            assert_eq!(got.indices, want, "root {root} kind {kind:?} depth {depth:?}");
+            assert_eq!(got.total_matches as usize, want.len());
+            checked += 1;
+        }
+    }
+    assert!(checked > 100);
+    assert!(parser.query_subtree(&doc, &tree, all, None, None, 8).is_err(), "root out of range");
+}

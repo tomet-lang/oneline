@@ -115,7 +115,7 @@ impl GpuParser {
         &self,
         pipeline: &wgpu::ComputePipeline,
         group0: &wgpu::BindGroup,
-        line_count: u32,
+        range: (u32, u32),
         kind: Option<NodeKind>,
         depth: Option<u32>,
         max_matches: usize,
@@ -127,10 +127,12 @@ impl GpuParser {
                 target_kind: kind.map(|k| k as u32).unwrap_or(0),
                 target_depth: depth.unwrap_or(0xFFFF_FFFF),
                 max_matches: max_u32,
-                _pad: 0,
+                range_start: range.0,
+                range_end: range.1,
+                _pad: [0; 3],
             };
             self.queue.write_buffer(&s.config, 0, bytemuck::bytes_of(&q_config));
-            let dims = dispatch_dims(line_count.div_ceil(64));
+            let dims = dispatch_dims(range.1.saturating_sub(range.0).div_ceil(64));
             let (total_matches, indices) =
                 self.read_counted(s, pipeline, group0, &s.group1, dims, max_u32, "filter", timer)?;
             Ok(QueryResult { total_matches, indices })
@@ -291,7 +293,7 @@ impl GpuParser {
             layout: &self.fused_layout,
             entries: &[bind(0, input_buffer), bind(1, line_offsets), bind(2, &config)],
         });
-        self.run_query(&self.fused_pipeline, &group0, line_count, kind, depth, max_matches, timer)
+        self.run_query(&self.fused_pipeline, &group0, (0, line_count), kind, depth, max_matches, timer)
     }
 }
 

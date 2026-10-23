@@ -103,7 +103,7 @@ impl GpuParser {
             Some(r) => self.run_query(
                 &self.filter_pipeline,
                 &r.parsed.bind_group,
-                doc.line_count,
+                (0, doc.line_count),
                 kind,
                 depth,
                 max_matches,
@@ -138,5 +138,28 @@ impl GpuParser {
         let timer = StageTimer::new(self);
         self.query_document_inner(doc, kind, depth, max_matches, Some(&timer))?;
         timer.finish(self)
+    }
+}
+
+impl GpuDocument {
+    pub(crate) fn nodes_buffer(&self) -> Option<&wgpu::Buffer> {
+        self.resident.as_ref().map(|r| &r.parsed.nodes)
+    }
+}
+
+impl GpuParser {
+    /// Filter over a range of lines of a resident document (`query_subtree` uses it).
+    pub(crate) fn query_range(
+        &self,
+        doc: &GpuDocument,
+        range: (u32, u32),
+        kind: Option<NodeKind>,
+        depth: Option<u32>,
+        max_matches: usize,
+    ) -> Result<QueryResult> {
+        match &doc.resident {
+            None => Ok(QueryResult { total_matches: 0, indices: Vec::new() }),
+            Some(r) => self.run_query(&self.filter_pipeline, &r.parsed.bind_group, range, kind, depth, max_matches, None),
+        }
     }
 }

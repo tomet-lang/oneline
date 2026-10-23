@@ -17,6 +17,7 @@ mod query;
 mod scan;
 mod search;
 mod timing;
+mod tree;
 #[cfg(test)]
 mod tests;
 mod util;
@@ -26,6 +27,7 @@ pub use parser::GpuParser;
 pub use query::QueryResult;
 pub use search::SearchResult;
 pub use timing::Profile;
+pub use tree::{GpuTree, MAX_TREE_DEPTH};
 pub use util::MAX_GPU_INPUT_LEN;
 
 #[repr(C)]
@@ -50,7 +52,9 @@ pub(crate) struct QueryConfig {
     pub target_kind: u32,
     pub target_depth: u32,
     pub max_matches: u32,
-    pub _pad: u32,
+    pub range_start: u32,
+    pub range_end: u32,
+    pub _pad: [u32; 3],
 }
 
 /// Longest pattern `search_*` accepts (it travels in a uniform buffer).

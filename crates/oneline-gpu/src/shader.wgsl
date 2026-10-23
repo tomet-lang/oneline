@@ -135,7 +135,12 @@ struct QueryConfig {
     target_kind: u32,
     target_depth: u32,
     max_matches: u32,
-    _pad: u32,
+    // Lines considered: range_start..range_end (the whole document for plain queries).
+    range_start: u32,
+    range_end: u32,
+    _pad1: u32,
+    _pad2: u32,
+    _pad3: u32,
 };
 
 @group(1) @binding(0) var<uniform> query: QueryConfig;
@@ -162,8 +167,8 @@ fn record_match(tid: u32) {
 // Query over nodes already resident in VRAM (see `GpuDocument`).
 @compute @workgroup_size(64)
 fn filter_nodes(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let tid = thread_index(global_id);
-    if (tid >= config.line_count) {
+    let tid = query.range_start + thread_index(global_id);
+    if (tid >= query.range_end || tid >= config.line_count) {
         return;
     }
     if (node_matches(nodes[tid])) {
@@ -176,8 +181,8 @@ fn filter_nodes(@builtin(global_invocation_id) global_id: vec3<u32>) {
 // `nodes` binding, so its bind group may omit it.
 @compute @workgroup_size(64)
 fn filter_fused(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let tid = thread_index(global_id);
-    if (tid >= config.line_count) {
+    let tid = query.range_start + thread_index(global_id);
+    if (tid >= query.range_end || tid >= config.line_count) {
         return;
     }
     if (node_matches(parse_one(tid))) {
