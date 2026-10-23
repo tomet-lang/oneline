@@ -15,6 +15,12 @@ pub struct GpuParser {
     /// Reused buffers for queries, so a query does not allocate. Guarded because
     /// a query reads results back through the shared staging buffer.
     pub(crate) query_scratch: std::sync::Mutex<Option<crate::query::QueryScratch>>,
+    /// Persistent staging buffers for pipelined uploads (see `staging.rs`).
+    pub(crate) staging: std::sync::Mutex<Option<crate::staging::StagingRing>>,
+    /// Tests only: caps the compact strategy's candidate buffer so its overflow path can be reached with a
+    /// small text (with the real capacity, a full workgroup tile is always hit first below 512 MB). 0 = off.
+    #[cfg(test)]
+    pub(crate) candidate_capacity_cap: std::sync::atomic::AtomicUsize,
 
     // Stage 2/3 pipelines (`shader.wgsl`).
     pub(crate) parse_pipeline: wgpu::ComputePipeline,
@@ -30,6 +36,11 @@ pub struct GpuParser {
     /// Substring search (`search.wgsl`): group 0 is just the text; group 1 reuses `query_layout`.
     pub(crate) search_pipeline: wgpu::ComputePipeline,
     pub(crate) text_layout: wgpu::BindGroupLayout,
+    /// Dictionary search (`many.wgsl`); `None` if the adapter lacks the shared memory it needs.
+    pub(crate) many: crate::many::ManyKernel,
+    pub(crate) many_run_layout: wgpu::BindGroupLayout,
+    pub(crate) many_set_layout: wgpu::BindGroupLayout,
+    pub(crate) many_compact_layout: wgpu::BindGroupLayout,
     /// Tree construction (`tree.wgsl`).
     pub(crate) tree: crate::tree::TreePipelines,
     pub(crate) tree_layout0: wgpu::BindGroupLayout,
@@ -175,6 +186,52 @@ impl GpuParser {
         let search_pipeline = pipeline(&device, "Search", &search_shader, "search", &[&text_layout, &query_layout]);
 
 
+
+        // Dictionary search. The kernels are specialized per pattern set (filter and histogram
+        // sizes are pipeline constants), so only the shader modules and layouts are built here.
+        let many_run_layout = bind_layout(
+            &device,
+            "Many Bind Group Layout 1",
+            &[uniform_entry(0), storage_entry(1, false), storage_entry(2, false), storage_entry(3, false)],
+        );
+        let many_set_layout = bind_layout(
+            &device,
+            "Many Bind Group Layout 2",
+            &[storage_entry(0, true), storage_entry(1, true), storage_entry(2, true), storage_entry(3, true)],
+        );
+        let many_compact_layout = bind_layout(
+            &device,
+            "Many Bind Group Layout 3",
+            &[storage_entry(0, false), storage_entry(1, false), storage_entry(2, false), storage_entry(3, false)],
+        );
+        let many_pipeline_layout = |label: &str, groups: &[&wgpu::BindGroupLayout]| {
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some(label),
+                bind_group_layouts: groups,
+                push_constant_ranges: &[],
+            })
+        };
+        let many = crate::many::ManyKernel {
+            shader_fused: device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("Oneline Many-Pattern Fused Shader"),
+                source: wgpu::ShaderSource::Wgsl(
+                    concat!(include_str!("many_common.wgsl"), include_str!("many_fused.wgsl")).into(),
+                ),
+            }),
+            shader_compact: device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("Oneline Many-Pattern Compact Shader"),
+                source: wgpu::ShaderSource::Wgsl(
+                    concat!(include_str!("many_common.wgsl"), include_str!("many_compact.wgsl")).into(),
+                ),
+            }),
+            layout_fused: many_pipeline_layout("Many Fused Pipeline Layout", &[&text_layout, &many_run_layout, &many_set_layout]),
+            layout_compact: many_pipeline_layout(
+                "Many Compact Pipeline Layout",
+                &[&text_layout, &many_run_layout, &many_set_layout, &many_compact_layout],
+            ),
+            pipelines: std::sync::Mutex::new(std::collections::HashMap::new()),
+        };
+
         // Tree construction.
         let tree_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Oneline Tree Compute Shader"),
@@ -242,6 +299,9 @@ impl GpuParser {
             software,
             timestamps,
             query_scratch: std::sync::Mutex::new(None),
+            staging: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            candidate_capacity_cap: std::sync::atomic::AtomicUsize::new(0),
             parse_pipeline,
             filter_pipeline,
             fused_pipeline,
@@ -250,6 +310,10 @@ impl GpuParser {
             query_layout,
             search_pipeline,
             text_layout,
+            many,
+            many_run_layout,
+            many_set_layout,
+            many_compact_layout,
             tree,
             tree_layout0,
             tree_layout1,
@@ -275,28 +339,23 @@ impl GpuParser {
         Ok(())
     }
 
-    /// Uploads the text as a `u32`-packed storage buffer with a single host copy.
+    /// Uploads the text as a `u32`-packed storage buffer, streamed through the staging ring.
     pub(crate) fn upload_text(&self, input: &str, timer: Option<&StageTimer>) -> Result<wgpu::Buffer> {
         let len = input.len();
         check_gpu_len(len)?;
-        let padded = ((len + 3) & !3).max(4) as u64;
-        self.check_fits(padded, "the input text")?;
+        let padded = ((len + 3) & !3).max(4);
+        self.check_fits(padded as u64, "the input text")?;
 
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Input Text Buffer"),
-            size: padded,
-            usage: wgpu::BufferUsages::STORAGE,
-            mapped_at_creation: true,
+            size: padded as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
-        mark(timer, "upload_text: create mapped buffer");
-        {
-            // Mapped-at-creation memory is zeroed, which provides the padding bytes.
-            let mut view = buffer.slice(..).get_mapped_range_mut();
-            view[..len].copy_from_slice(input.as_bytes());
-        }
-        mark(timer, "upload_text: host memcpy into mapped memory");
-        buffer.unmap();
-        mark(timer, "upload_text: unmap (wgpu staging copy)");
+        mark(timer, "upload_text: create device buffer");
+        // The text, then zeros up to the next word boundary (the shaders read whole words).
+        self.stream_to_buffer(&buffer, 0, input.as_bytes(), padded - len)?;
+        mark(timer, "upload_text: stream through the staging ring");
         Ok(buffer)
     }
 

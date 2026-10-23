@@ -445,3 +445,279 @@ fn gpu_subtree_query_matches_cpu() {
     assert!(checked > 100);
     assert!(parser.query_subtree(&doc, &tree, all, None, None, 8).is_err(), "root out of range");
 }
+
+// ---- streaming upload ------------------------------------------------------
+
+/// The upload goes through a ring of 4 x 16 MiB staging buffers. 90 MB wraps the ring more than once, so
+/// a chunk written to the wrong place or a buffer overwritten while its DMA is still reading it changes
+/// what a search finds. (The zero padding after the text is not tested: the shaders bound-check against
+/// `text_len`, so its content cannot change a result.)
+#[test]
+fn streaming_upload_places_every_chunk_correctly() {
+    let parser = gpu!();
+    // 100-byte records with one marker at a fixed spot; a chunk boundary (16 MiB) is not a multiple of
+    // 100, so records straddle chunks. The text ends mid-word (3 extra bytes) to exercise the padding.
+    let record = format!("{:<46}MARKER{:<47}\n", "header", "x");
+    assert_eq!(record.len(), 100);
+    let records = 900_000usize;
+    let mut text = record.repeat(records);
+    text.push_str("end");
+
+    let expected: Vec<u32> = (0..records).map(|k| (k * 100 + 46) as u32).collect();
+    let tail_at = (records * 100) as u32;
+    for round in 0..2 {
+        // Two uploads in a row: the second reuses a ring whose buffers may still be in flight.
+        let doc = parser.upload(&text).unwrap();
+        let r = parser.search_document(&doc, b"MARKER", records).unwrap();
+        assert_eq!(r.total_matches as usize, records, "round {round}");
+        assert_eq!(r.offsets, expected, "round {round}: a chunk landed in the wrong place");
+        let end = parser.search_document(&doc, b"end", 4).unwrap();
+        assert_eq!(end.offsets, vec![tail_at], "round {round}: the unaligned tail was lost");
+        assert_eq!(doc.text_len(), text.len());
+    }
+    // The one-shot path streams too.
+    assert_eq!(parser.search_raw(&text, b"MARKER", records).unwrap().offsets, expected);
+}
+
+/// Sizes around the chunk size and around word alignment, including the empty-ring first use.
+#[test]
+fn streaming_upload_handles_sizes_around_the_chunk_size() {
+    let parser = gpu!();
+    let chunk = 16usize << 20;
+    for len in [1usize, 3, 4, 5, chunk - 1, chunk, chunk + 1, chunk + 3, 2 * chunk, 2 * chunk + 2, 5 * chunk + 1] {
+        let mut text = vec![b'.'; len];
+        let first = 0usize;
+        let last = len - 1;
+        text[first] = b'A';
+        text[last] = b'Z';
+        let text = String::from_utf8(text).unwrap();
+        let doc = parser.upload(&text).unwrap();
+        let a = parser.search_document(&doc, b"A", 4).unwrap();
+        let z = parser.search_document(&doc, b"Z", 4).unwrap();
+        if len == 1 {
+            // 'Z' overwrote 'A'
+            assert_eq!(z.offsets, vec![0], "len 1");
+        } else {
+            assert_eq!(a.offsets, vec![0], "len {len}: first byte");
+            assert_eq!(z.offsets, vec![last as u32], "len {len}: last byte");
+        }
+    }
+}
+
+// ---- dictionary search -----------------------------------------------------
+
+use crate::{ManyHit, MAX_PATTERNS};
+
+fn many_cpu(text: &str, patterns: &[&[u8]]) -> (Vec<u32>, Vec<ManyHit>) {
+    let m = oneline_simd::ManyPatterns::new(patterns);
+    let hits: Vec<ManyHit> = m
+        .find_all_par(text.as_bytes())
+        .into_iter()
+        .map(|h| ManyHit { pattern: h.pattern, offset: h.offset })
+        .collect();
+    let mut counts = vec![0u32; patterns.len()];
+    for h in &hits {
+        counts[h.pattern as usize] += 1;
+    }
+    (counts, hits)
+}
+
+/// The GPU's counts and hits must equal Aho-Corasick's, counting and recording.
+fn assert_many_matches_cpu(parser: &GpuParser, text: &str, patterns: &[&[u8]], what: &str) {
+    let (want_counts, want_hits) = many_cpu(text, patterns);
+    let doc = parser.upload(text).unwrap();
+    let set = parser.compile_patterns(&doc, patterns).unwrap();
+    assert_eq!(set.len(), patterns.len());
+
+    let counted = parser.search_many(&doc, &set, 0).unwrap();
+    assert_eq!(counted.counts, want_counts, "{what}: counts (count-only)");
+    assert_eq!(counted.total_hits as usize, want_hits.len(), "{what}: total");
+    assert!(counted.hits.is_empty());
+
+    let full = parser.search_many(&doc, &set, want_hits.len().max(1)).unwrap();
+    assert_eq!(full.counts, want_counts, "{what}: counts (recording)");
+    assert_eq!(full.hits, want_hits, "{what}: hits");
+}
+
+#[test]
+fn many_patterns_match_aho_corasick_on_generated_text() {
+    let parser = gpu!();
+    let vocab = datagen::prose_vocabulary();
+    let text = datagen::generate(Profile::Prose, 3 << 20, 12);
+    let bytes = text.as_bytes();
+    let mut rng = datagen::Rng::new(77);
+    let words: Vec<&[u8]> = vocab.iter().filter(|w| w.len() >= 4).map(|w| w.as_bytes()).collect();
+    for n in [1usize, 2, 7, 64, 500, MAX_PATTERNS] {
+        // A mix: vocabulary words (frequent and rare) and slices of the text itself.
+        let mut patterns: Vec<&[u8]> = Vec::new();
+        for i in 0..n {
+            if i % 3 == 2 {
+                let len = rng.range(4, 65) as usize;
+                let at = rng.below((bytes.len() - len) as u64) as usize;
+                patterns.push(&bytes[at..at + len]);
+            } else {
+                patterns.push(words[rng.below(words.len() as u64) as usize]);
+            }
+        }
+        assert_many_matches_cpu(&parser, &text, &patterns, &format!("{n} patterns"));
+    }
+}
+
+#[test]
+fn many_patterns_handle_overlap_nesting_duplicates_and_edges() {
+    let parser = gpu!();
+    // Patterns that contain each other, share prefixes/suffixes, repeat, or sit at the text edges.
+    let text = "abcdefabcdefabcd\0\0\0\0abcdxabcdef|||||- - -\nabcdabcd";
+    let patterns: Vec<&[u8]> = vec![
+        b"abcd", b"abcdef", b"bcde", b"abcdef", b"cdefabcd", b"abcdabcd", b"\0\0\0\0", b"||||", b"- - -", b"\n|", b"abcdx",
+        b"xxxx-not-there", b"abcdabcd",
+    ];
+    // "\n|" is 2 bytes: not allowed, drop it for the comparison.
+    let patterns: Vec<&[u8]> = patterns.into_iter().filter(|p| p.len() >= 4).collect();
+    assert_many_matches_cpu(&parser, text, &patterns, "nested/overlapping");
+    // Whole-text pattern, pattern at the very start and the very end, text shorter than a pattern.
+    assert_many_matches_cpu(&parser, "abcdefgh", &[b"abcdefgh", b"abcd", b"efgh"], "whole text");
+    assert_many_matches_cpu(&parser, "abcdefgh", &[b"abcdefghi", b"zzzz"], "pattern longer than the text");
+    // Each pattern length from 4 to 64 occurring at every alignment.
+    let mut text = String::new();
+    let mut patterns_owned: Vec<Vec<u8>> = Vec::new();
+    for len in 4..=64usize {
+        let p: Vec<u8> = (0..len).map(|i| b'a' + ((i * 7 + len) % 26) as u8).collect();
+        for shift in 0..4 {
+            text.push_str(&"#".repeat(shift));
+            text.push_str(std::str::from_utf8(&p).unwrap());
+            text.push('\n');
+        }
+        patterns_owned.push(p);
+    }
+    let patterns: Vec<&[u8]> = patterns_owned.iter().map(|p| p.as_slice()).collect();
+    assert_many_matches_cpu(&parser, &text, &patterns, "lengths 4..=64 at all alignments");
+}
+
+/// Two different 4-byte windows with the same hash share a bucket: the verifier, not the filter,
+/// must tell them apart.
+#[test]
+fn many_patterns_survive_hash_collisions() {
+    let parser = gpu!();
+    // Find two windows with the same 18-bit hash by brute force (a few hundred tries).
+    let hash = |w: u32| w.wrapping_mul(0x9E37_79B1) >> 14;
+    let mut seen = std::collections::HashMap::new();
+    let mut pair = None;
+    for i in 0u32..26 * 26 * 26 * 26 {
+        // Lowercase letters only, so both windows are ASCII.
+        let w = u32::from_le_bytes([
+            b'a' + (i % 26) as u8,
+            b'a' + (i / 26 % 26) as u8,
+            b'a' + (i / 676 % 26) as u8,
+            b'a' + (i / 17576) as u8,
+        ]);
+        if let Some(&other) = seen.get(&hash(w)) {
+            if other != w {
+                pair = Some((other, w));
+                break;
+            }
+        }
+        seen.insert(hash(w), w);
+    }
+    let (a, b) = pair.expect("a collision exists among the 456,976 lowercase windows");
+    let (pa, pb) = (a.to_le_bytes().to_vec(), b.to_le_bytes().to_vec());
+    assert_ne!(pa, pb);
+    let text = format!("zz{0}zz{1}zz{0}{1}zz", String::from_utf8_lossy(&pa), String::from_utf8_lossy(&pb));
+    // Only meaningful if the text is valid for both byte strings (ASCII range): ensure it.
+    assert!(pa.iter().chain(&pb).all(|&c| c < 128), "collision pair must be ASCII for this text");
+    assert_many_matches_cpu(&parser, &text, &[pa.as_slice(), pb.as_slice(), b"zzzz-none"], "colliding windows");
+}
+
+#[test]
+fn many_patterns_validate_their_input_and_truncate_consistently() {
+    let parser = gpu!();
+    let doc = parser.upload(&datagen::generate(Profile::Prose, 2 << 20, 3)).unwrap();
+    let ok: &[&[u8]] = &[b"abcd"];
+    assert!(parser.compile_patterns(&doc, &[]).is_err(), "empty set");
+    assert!(parser.compile_patterns(&doc, &[b"abc"]).is_err(), "3 bytes is too short");
+    assert!(parser.compile_patterns(&doc, &[&[b'a'; 65]]).is_err(), "65 bytes is too long");
+    let too_many: Vec<&[u8]> = vec![b"abcd"; MAX_PATTERNS + 1];
+    assert!(parser.compile_patterns(&doc, &too_many).is_err(), "too many patterns");
+    assert!(parser.compile_patterns(&doc, ok).is_ok());
+
+    // Truncation keeps the true totals.
+    let vocab = datagen::prose_vocabulary();
+    let patterns: Vec<&[u8]> = vec![vocab[0].as_bytes(), vocab[1].as_bytes()];
+    let set = parser.compile_patterns(&doc, &patterns).unwrap();
+    let all = parser.search_many(&doc, &set, 0).unwrap();
+    assert!(all.total_hits > 1000);
+    let few = parser.search_many(&doc, &set, 50).unwrap();
+    assert_eq!(few.counts, all.counts);
+    assert_eq!(few.total_hits, all.total_hits);
+    assert_eq!(few.hits.len(), 50);
+    // Repeated searches reuse the set's buffers and must give the same answer each time.
+    for _ in 0..3 {
+        assert_eq!(parser.search_many(&doc, &set, 0).unwrap().counts, all.counts);
+    }
+    // A set searched against an empty document finds nothing.
+    let empty = parser.upload("").unwrap();
+    assert_eq!(parser.search_many(&empty, &set, 8).unwrap().counts, vec![0, 0]);
+}
+
+/// A window hit near the start of the text can imply a pattern start *before* the text; the
+/// unsigned subtraction would wrap. With a pattern that starts with NUL, out-of-range reads
+/// "match" it, so a missing guard reports a bogus occurrence.
+#[test]
+fn many_patterns_reject_window_hits_that_imply_a_start_before_the_text() {
+    let parser = gpu!();
+    // NUL is common in this text, so the pattern's rarest window is "bcdq" (index 1), whose only hit
+    // is at text offset 0.
+    let text = format!("bcdq{}xyz", "\0".repeat(5000));
+    let pattern = [0u8, b'b', b'c', b'd', b'q'];
+    assert!(many_cpu(&text, &[&pattern, b"zzzz"]).1.is_empty());
+    assert_many_matches_cpu(&parser, &text, &[&pattern, b"zzzz"], "start before the text");
+}
+
+/// If candidates overflow what the compact strategy can hold, the query must be redone with the fused
+/// kernel and still be exact. All-'a' text with an "aaaa" pattern makes EVERY position a candidate:
+/// far more than one workgroup's tile (4000) and more than the buffer (text / 8).
+#[test]
+fn many_patterns_fall_back_when_candidates_overflow() {
+    let parser = gpu!();
+    let text = "a".repeat(1 << 20);
+    // Enough patterns to select the compact strategy; one of them saturates the filter.
+    let mut owned: Vec<Vec<u8>> = (0..crate::many::COMPACT_MIN_PATTERNS as u32 - 1).map(|i| format!("zq{i:03}x").into_bytes()).collect();
+    owned.push(b"aaaa".to_vec());
+    let patterns: Vec<&[u8]> = owned.iter().map(|p| p.as_slice()).collect();
+    assert_many_matches_cpu(&parser, &text, &patterns, "saturated filter");
+
+    let doc = parser.upload(&text).unwrap();
+    let set = parser.compile_patterns(&doc, &patterns).unwrap();
+    let profile = parser.profile_search_many(&doc, &set, 0).unwrap();
+    let step = |name: &str| profile.host_steps.iter().any(|(label, _)| label.contains(name));
+    assert!(step("(compact)"), "the compact strategy should have been tried first: {:?}", profile.host_steps);
+    assert!(step("(fused)"), "and the fused kernel should have redone it: {:?}", profile.host_steps);
+
+    // A sparse query on the same set stays on the compact path.
+    let sparse = parser.upload(&datagen::generate(Profile::Prose, 2 << 20, 6)).unwrap();
+    let sparse_set = parser.compile_patterns(&sparse, &patterns).unwrap();
+    let profile = parser.profile_search_many(&sparse, &sparse_set, 0).unwrap();
+    assert!(!profile.host_steps.iter().any(|(label, _)| label.contains("(fused)")), "{:?}", profile.host_steps);
+}
+
+/// The candidate buffer overflowing (as opposed to one workgroup's tile) must also be reported and
+/// redone: with the capacity capped at 100 entries, a sparse-looking query that finds a few thousand
+/// candidates overflows only the buffer.
+#[test]
+fn many_patterns_fall_back_when_the_candidate_buffer_overflows() {
+    let parser = gpu!();
+    let vocab = datagen::prose_vocabulary();
+    let text = datagen::generate(Profile::Prose, 2 << 20, 9);
+    let owned: Vec<&[u8]> = vocab.iter().filter(|w| w.len() >= 4).take(crate::many::COMPACT_MIN_PATTERNS).map(|w| w.as_bytes()).collect();
+    parser.candidate_capacity_cap.store(100, std::sync::atomic::Ordering::Relaxed);
+    assert_many_matches_cpu(&parser, &text, &owned, "buffer overflow");
+    let doc = parser.upload(&text).unwrap();
+    let set = parser.compile_patterns(&doc, &owned).unwrap();
+    let profile = parser.profile_search_many(&doc, &set, 0).unwrap();
+    assert!(
+        profile.host_steps.iter().any(|(label, _)| label.contains("(fused)")),
+        "the buffer overflow should have forced the fused rerun: {:?}",
+        profile.host_steps
+    );
+    parser.candidate_capacity_cap.store(0, std::sync::atomic::Ordering::Relaxed);
+}
