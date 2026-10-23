@@ -61,6 +61,8 @@ fn kind_name(kind: NodeKind) -> &'static str {
         NodeKind::Element => "element",
         NodeKind::List => "list",
         NodeKind::Connect => "connect",
+        NodeKind::OrderedList => "ordered-list",
+        NodeKind::Comment => "comment",
         NodeKind::Unknown => "unknown",
     }
 }

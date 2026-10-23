@@ -45,6 +45,8 @@ pub enum NodeKind {
     Element = 3,
     List = 4,
     Connect = 5,
+    OrderedList = 6,
+    Comment = 7,
     Unknown = 99,
 }
 
@@ -57,6 +59,8 @@ impl NodeKind {
             3 => Self::Element,
             4 => Self::List,
             5 => Self::Connect,
+            6 => Self::OrderedList,
+            7 => Self::Comment,
             _ => Self::Unknown,
         }
     }
@@ -69,6 +73,8 @@ impl NodeKind {
             Self::Element => "element",
             Self::List => "list",
             Self::Connect => "connect",
+            Self::OrderedList => "ordered-list",
+            Self::Comment => "comment",
             Self::Unknown => "unknown",
         }
     }

@@ -85,7 +85,10 @@ fn gpu_parse_matches_cpu() {
     for case in ["x", "x\n", "\n", "\r\n", "a\r\nb", "||||\n|||| \n", "```\n- x\n```\n", "| 日本語\n",
         // tomet grammar boundaries: list needs a blank after `-`; `>`, `*`, `1.` and fences are plain text.
         "-\tx\n", "- x\n", "-x\n", "-\n", "- \n", ":rule(a)\n|| :{y:2}\n", "=\n=[ t ]\n", "@\n",
-        "> a\n* b\n1. c\n", "|-\tx\n|:y\n"] {
+        "> a\n* b\n1. c\n", "|-\tx\n|:y\n",
+        "// c\n", "//\n", "/x\n", "/\n", "|| // c\n", "http://x\n", "/// doc\n",
+        "| | x\n", "|  | x\n", "|\t|x\n", "| x | y\n", "| |\n", "|| |\n", " | x\n", "|| \t | \n",
+        "-. x\n", "-.\tx\n", "-.x\n", "-.\n", "-. \n", "-..\n", "- -. x\n"] {
         let cpu = oneline_simd::parse(case);
         let gpu = parser.parse_raw(case).unwrap();
         assert_eq!(gpu, cpu, "case {case:?}");
@@ -129,7 +132,7 @@ fn resident_and_fused_queries_match_cpu() {
     assert_eq!(doc.text_len(), text.len());
 
     let kinds = [None, Some(NodeKind::Text), Some(NodeKind::Heading), Some(NodeKind::Element),
-                 Some(NodeKind::List), Some(NodeKind::Connect)];
+                 Some(NodeKind::List), Some(NodeKind::OrderedList), Some(NodeKind::Connect), Some(NodeKind::Comment)];
     let depths = [None, Some(0), Some(1), Some(3), Some(50)];
     let all = tree.nodes.len();
     for &kind in &kinds {

@@ -1,3 +1,5 @@
+pub mod compat;
+
 use anyhow::Result;
 use oneline_core::{FlatNode, FlatTree, NONE, NodeKind, TreeLinks};
 use rayon::prelude::*;
@@ -20,19 +22,25 @@ pub fn to_tomet_ast_with_links(tree: &FlatTree, links: &TreeLinks) -> Result<Doc
     assert_eq!(tree.nodes.len(), links.len(), "links do not belong to this tree");
     let n = tree.nodes.len();
 
+    // tomet gives `|` lines a meaning only below an element, and a line with nothing on it ends that
+    // content. So a `|` line is *literal text* unless its parent is an element that is itself real
+    // and that no bare blank line separates from it.
+    let (literal, parent) = literal_pipe_lines(tree, links);
+
     // Each line becomes one block on its own, so this is embarrassingly parallel.
     let mut blocks: Vec<Option<Block>> = tree
         .nodes
         .par_iter()
-        .map(|node| {
-            if node.kind() == NodeKind::Blank {
+        .enumerate()
+        .map(|(i, node)| {
+            if matches!(node.kind(), NodeKind::Blank | NodeKind::Comment) {
                 return None;
             }
             let raw_text = tree.content_of(node).trim();
             if raw_text.is_empty() {
                 return None;
             }
-            Some(parse_line_to_block(node, raw_text))
+            Some(if literal[i] { literal_block(tree, i) } else { parse_line_to_block(node, raw_text) })
         })
         .collect();
 
@@ -50,7 +58,7 @@ pub fn to_tomet_ast_with_links(tree: &FlatTree, links: &TreeLinks) -> Result<Doc
             // A line without a block of its own: its children belong to its parent.
             None => children,
         };
-        let sink = match links.parent[i] {
+        let sink = match parent[i] {
             NONE => &mut roots,
             p => &mut kids[p as usize],
         };
@@ -58,21 +66,104 @@ pub fn to_tomet_ast_with_links(tree: &FlatTree, links: &TreeLinks) -> Result<Doc
     }
     roots.reverse();
 
-    Ok(Document::new(roots, Span::dummy()))
+    Ok(Document::new(nest_sections(roots), Span::dummy()))
+}
+
+/// `literal[i]`: line `i` starts with `|` but is not the content of an element, so tomet reads it as text.
+/// Also returns the parents to stitch with: a line cut off from its element by a bare blank line
+/// is no longer inside it (nor inside anything else, the blank ended every `|` context), so it
+/// stands at the top level.
+fn literal_pipe_lines(tree: &FlatTree, links: &TreeLinks) -> (Vec<bool>, Vec<u32>) {
+    let n = tree.nodes.len();
+    let mut literal = vec![false; n];
+    let mut parent = links.parent.clone();
+    // Index of the latest bare blank line (no `|` at all) before the current line.
+    let mut last_blank: Option<usize> = None;
+    for i in 0..n {
+        let node = &tree.nodes[i];
+        if node.kind() == NodeKind::Blank && node.depth == 0 {
+            last_blank = Some(i);
+            continue;
+        }
+        if node.depth == 0 {
+            continue;
+        }
+        literal[i] = match links.parent[i] {
+            NONE => true,
+            p => {
+                let p = p as usize;
+                if last_blank.is_some_and(|b| b > p) {
+                    parent[i] = NONE;
+                    true
+                } else {
+                    tree.nodes[p].kind() != NodeKind::Element || literal[p]
+                }
+            }
+        };
+    }
+    (literal, parent)
+}
+
+/// The block for a line that is plain text to tomet, whatever it looks like: the whole line, `|`
+/// prefix included, goes through tomet's own inline parsing.
+fn literal_block(tree: &FlatTree, i: usize) -> Block {
+    let start = tree.line_offsets[i] as usize;
+    let end = tree.line_offsets.get(i + 1).map_or(tree.source.len(), |&e| e as usize);
+    let line = tree.source[start..end].trim_end_matches(['\r', '\n']);
+    if let Ok(doc) = tomet_parser::parse_document(line) {
+        if let Some(first_block) = doc.blocks.into_iter().next() {
+            return first_block;
+        }
+    }
+    Block::Paragraph(Paragraph::new(vec![Inline::Text(Text::new(line, Span::dummy()))], Span::dummy()))
+}
+
+/// Puts every block that follows a heading, up to the next heading of the same or a lower level,
+/// into that heading's section. Applies to one block sequence (the document, or an element's content).
+fn nest_sections(blocks: Vec<Block>) -> Vec<Block> {
+    fn close_top(open: &mut Vec<Section>, out: &mut Vec<Block>) {
+        let done = open.pop().expect("a section is open");
+        match open.last_mut() {
+            Some(parent) => parent.blocks.push(Block::Section(done)),
+            None => out.push(Block::Section(done)),
+        }
+    }
+    let mut out = Vec::new();
+    let mut open: Vec<Section> = Vec::new();
+    for block in blocks {
+        match block {
+            Block::Section(section) => {
+                while open.last().is_some_and(|top| top.level >= section.level) {
+                    close_top(&mut open, &mut out);
+                }
+                open.push(section);
+            }
+            other => match open.last_mut() {
+                Some(top) => top.blocks.push(other),
+                None => out.push(other),
+            },
+        }
+    }
+    while !open.is_empty() {
+        close_top(&mut open, &mut out);
+    }
+    out
 }
 
 /// Parses a single line's content and NodeKind into an initial Block.
 fn parse_line_to_block(node: &FlatNode, text: &str) -> Block {
     match node.kind() {
         NodeKind::Heading => {
-            // "=[ Header ]" or "= Header"
-            let title_text = text
-                .trim_start_matches('=')
-                .trim_start_matches('[')
-                .trim_end_matches(']')
-                .trim();
+            // "=[ Header ]", "== Header": the level is the number of `=`, the title is parsed by tomet.
+            if let Ok(doc) = tomet_parser::parse_document(text) {
+                if let Some(first_block @ Block::Section(_)) = doc.blocks.into_iter().next() {
+                    return first_block;
+                }
+            }
+            let level = text.chars().take_while(|&c| c == '=').count().max(1);
+            let title_text = text.trim_start_matches('=').trim_start_matches('[').trim_end_matches(']').trim();
             let inline = Inline::Text(Text::new(title_text, Span::dummy()));
-            Block::Section(Section::new(node.depth.max(1) as usize, vec![inline], Span::dummy()))
+            Block::Section(Section::new(level, vec![inline], Span::dummy()))
         }
         NodeKind::Element => {
             // Use tomet-parser to parse element syntax like @card(title: "...").
@@ -87,7 +178,7 @@ fn parse_line_to_block(node: &FlatNode, text: &str) -> Block {
                 Span::dummy(),
             ))
         }
-        NodeKind::List | NodeKind::Connect => {
+        NodeKind::List | NodeKind::OrderedList | NodeKind::Connect => {
             // Use tomet-parser to parse the list item or connect line.
             if let Ok(doc) = tomet_parser::parse_document(text) {
                 if let Some(first_block) = doc.blocks.into_iter().next() {
@@ -124,7 +215,7 @@ fn finish(block: Block, children: Vec<Block>) -> Vec<Block> {
             vec![Block::Section(section)]
         }
         Block::Element(mut element) => {
-            element.content = Some(children);
+            element.content = Some(nest_sections(children));
             vec![Block::Element(element)]
         }
         Block::Paragraph(mut paragraph) => {
@@ -172,102 +263,10 @@ fn attach_sublist(slot: &mut Option<List>, sub: List) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oneline_core::datagen::Rng;
-    use tomet_ast::Element;
-
-    /// The previous stack-based builder, kept as an oracle for documents whose
-    /// structure it handled without dropping anything.
-    mod reference {
-        use super::*;
-
-        pub fn to_tomet_ast(tree: &FlatTree) -> Document {
-            let mut root_blocks: Vec<Block> = Vec::new();
-            let mut block_stack: Vec<(u32, Candidate)> = Vec::new();
-
-            for node in &tree.nodes {
-                if node.kind() == NodeKind::Blank {
-                    continue;
-                }
-                let raw_text = tree.content_of(node).trim();
-                if raw_text.is_empty() {
-                    continue;
-                }
-                let block = parse_line_to_block(node, raw_text);
-
-                while let Some((stack_depth, _)) = block_stack.last() {
-                    if *stack_depth >= node.depth {
-                        let (_, finished) = block_stack.pop().unwrap();
-                        let finished_block = finished.into_block();
-                        if let Some((_, parent)) = block_stack.last_mut() {
-                            parent.add_child(finished_block);
-                        } else {
-                            root_blocks.push(finished_block);
-                        }
-                    } else {
-                        break;
-                    }
-                }
-                block_stack.push((node.depth, Candidate::new(block)));
-            }
-            while let Some((_, finished)) = block_stack.pop() {
-                let finished_block = finished.into_block();
-                if let Some((_, parent)) = block_stack.last_mut() {
-                    parent.add_child(finished_block);
-                } else {
-                    root_blocks.push(finished_block);
-                }
-            }
-            Document::new(root_blocks, Span::dummy())
-        }
-
-        enum Candidate {
-            Section { section: Section, children: Vec<Block> },
-            Element { element: Element, children: Vec<Block> },
-            Other(Block),
-        }
-
-        impl Candidate {
-            fn new(block: Block) -> Self {
-                match block {
-                    Block::Section(s) => Self::Section { section: s, children: Vec::new() },
-                    Block::Element(e) => Self::Element { element: e, children: Vec::new() },
-                    other => Self::Other(other),
-                }
-            }
-            fn add_child(&mut self, child: Block) {
-                match self {
-                    Self::Section { children, .. } => children.push(child),
-                    Self::Element { children, .. } => children.push(child),
-                    Self::Other(Block::Paragraph(p)) => {
-                        if let Block::Paragraph(child_p) = child {
-                            p.content.push(Inline::SoftBreak(tomet_ast::SoftBreak { span: Span::dummy() }));
-                            p.content.extend(child_p.content);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            fn into_block(self) -> Block {
-                match self {
-                    Self::Section { mut section, children } => {
-                        section.blocks = children;
-                        Block::Section(section)
-                    }
-                    Self::Element { mut element, children } => {
-                        if !children.is_empty() {
-                            element.content = Some(children);
-                        }
-                        Block::Element(element)
-                    }
-                    Self::Other(b) => b,
-                }
-            }
-        }
-    }
 
     #[test]
     fn test_to_tomet_ast_basic() {
-        let text = "| @card(title:\"tomet-shelf\")\n|| Lightweight and fast\n";
+        let text = "@card(title:\"tomet-shelf\")\n| Lightweight and fast\n";
         let tree = oneline_simd::parse(text);
         let doc = to_tomet_ast(&tree).unwrap();
 
@@ -282,67 +281,11 @@ mod tests {
         }
     }
 
-    /// Random documents in which only containers (heading / element)
-    /// have children — the shape the old builder handled losslessly.
-    fn container_only_doc(rng: &mut Rng, lines: usize) -> String {
-        let mut out = String::new();
-        // (depth, is_container) of the currently open lines.
-        let mut open: Vec<(u32, bool)> = Vec::new();
-        for _ in 0..lines {
-            let (text, container) = match rng.below(7) {
-                0 => ("=[ Title ]", true),
-                1 => ("@note(title: \"n\")", true),
-                2 => ("@card(title: \"t\")", true),
-                3 => ("- item", false),
-                4 => ("plain prose", false),
-                5 => ("", false), // blank: not part of the tree, must not touch `open`
-                _ => ("- numbered", false),
-            };
-            // Pick a depth whose parent (nearest shallower open line) is a container.
-            let depth = loop {
-                let d = rng.below(5) as u32;
-                match open.iter().rev().find(|&&(od, _)| od < d) {
-                    Some(&(_, false)) if !text.is_empty() => continue,
-                    _ => break d,
-                }
-            };
-            if !text.is_empty() {
-                while open.last().is_some_and(|&(od, _)| od >= depth) {
-                    open.pop();
-                }
-            }
-            for _ in 0..depth {
-                out.push('|');
-            }
-            if depth > 0 {
-                out.push(' ');
-            }
-            out.push_str(text);
-            out.push('\n');
-            if !text.is_empty() {
-                open.push((depth, container));
-            }
-        }
-        out
-    }
-
-    #[test]
-    fn matches_previous_builder_on_container_documents() {
-        let mut rng = Rng::new(77);
-        for round in 0..60 {
-            let doc = container_only_doc(&mut rng, 5 + round * 7);
-            let tree = oneline_simd::parse(&doc);
-            let want = reference::to_tomet_ast(&tree);
-            let got = to_tomet_ast(&tree).unwrap();
-            assert_eq!(format!("{got:?}"), format!("{want:?}"), "round {round}\n{doc}");
-        }
-    }
-
     #[test]
     fn children_of_leaves_are_kept_not_dropped() {
         // A paragraph with a deeper list and a deeper element beneath it, and a
         // list item with a deeper paragraph: the old builder lost all of these.
-        let doc = "| lead prose\n|| - nested item\n|| @card(title: \"kept\")\n| - item\n|| trailing detail\n";
+        let doc = "@note\n| lead prose\n| @card(title: \"kept\")\n| | - nested item\n| - item\n| | trailing detail\n";
         let tree = oneline_simd::parse(doc);
         let ast = to_tomet_ast(&tree).unwrap();
         let dump = format!("{ast:?}");
@@ -351,15 +294,66 @@ mod tests {
         }
     }
 
-    #[test]
-    fn deeper_list_becomes_sublist() {
-        let doc = "| - parent\n|| - child\n|| - child 2\n";
-        let tree = oneline_simd::parse(doc);
-        let ast = to_tomet_ast(&tree).unwrap();
-        assert_eq!(ast.blocks.len(), 1, "{ast:?}");
-        let Block::List(list) = &ast.blocks[0] else { panic!("{:?}", ast.blocks[0]) };
-        let sub = list.items[0].sublist.as_ref().expect("sublist");
-        assert_eq!(sub.items.len(), 2);
-    }
 }
 
+
+#[cfg(test)]
+mod differential {
+    use super::compat::{Outcome, compare};
+    use oneline_core::datagen::Rng;
+
+    /// Documents built only from constructs oneline claims to read the way tomet does: headings of any
+    /// level, elements with `|` content (nested too), single-line paragraphs and list items, `//`
+    /// comments, all separated by blank lines where tomet would otherwise join or split differently.
+    fn supported_doc(rng: &mut Rng, blocks: usize) -> String {
+        let mut out = String::new();
+        for _ in 0..blocks {
+            match rng.below(11) {
+                0 => {
+                    let marks = "=".repeat(1 + rng.below(4) as usize);
+                    let n = rng.below(100);
+                    if rng.chance(30) {
+                        out.push_str(&format!("{marks}[ Heading {n} ]\n"));
+                    } else {
+                        out.push_str(&format!("{marks} Heading {n}\n"));
+                    }
+                }
+                1 => out.push_str(&format!("plain paragraph {}\n", rng.below(1000))),
+                2 => out.push_str(&format!("- item {}\n", rng.below(1000))),
+                3 => out.push_str(&format!("-. step {}\n", rng.below(1000))),
+                4 => out.push_str(&format!("// comment {}\n", rng.below(1000))),
+                5 => {
+                    out.push_str("@card(title: \"t\")\n");
+                    for _ in 0..rng.below(3) {
+                        out.push_str(&format!("| child text {}\n|\n", rng.below(100)));
+                    }
+                }
+                6 => {
+                    out.push_str("@outer\n| @inner\n| | deep text\n|\n| after inner\n");
+                }
+                7 => out.push_str("@solo(a: 1)\n"),
+                // `|` lines that are not the content of an element are plain text to tomet.
+                8 => out.push_str(&format!("= Under {}\n| pipe under a heading\n", rng.below(10))),
+                9 => out.push_str("- an item\n| pipe under a list item\n"),
+                _ => out.push_str("@card(title: \"c\")\n| inside\n\n| after a blank line\n"),
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    #[test]
+    fn matches_tomet_on_supported_documents() {
+        let mut rng = Rng::new(2024);
+        for round in 0..300 {
+            let doc = supported_doc(&mut rng, 1 + (round % 12));
+            match compare(&doc) {
+                Outcome::Same => {}
+                Outcome::ReferenceError(e) => panic!("round {round}: tomet rejects the generated document: {e}\n{doc}"),
+                Outcome::Different { real, ours } => {
+                    panic!("round {round}: trees differ\n{doc}\ntomet: {real}\nours:  {ours}")
+                }
+            }
+        }
+    }
+}

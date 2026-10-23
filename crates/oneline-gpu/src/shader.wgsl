@@ -53,12 +53,23 @@ fn parse_one(tid: u32) -> FlatNode {
         return FlatNode(0u, 0u, line_start, 0u); // Blank
     }
 
-    // Count consecutive prefix '|' (0x7C) characters (nesting depth).
+    // Count prefix '|' (0x7C) characters (nesting depth); blanks may separate them (`| | x`).
     var depth = 0u;
     var cursor = line_start;
     while (cursor < eff_end && get_byte(cursor) == 124u) { // 124 == '|'
-        depth = depth + 1u;
-        cursor = cursor + 1u;
+        while (cursor < eff_end && get_byte(cursor) == 124u) {
+            depth = depth + 1u;
+            cursor = cursor + 1u;
+        }
+        var probe = cursor;
+        while (probe < eff_end && (get_byte(probe) == 32u || get_byte(probe) == 9u)) {
+            probe = probe + 1u;
+        }
+        if (probe < eff_end && get_byte(probe) == 124u) {
+            cursor = probe;
+        } else {
+            break;
+        }
     }
 
     // Skip whitespace immediately following prefix (' ' = 32, '\t' = 9).
@@ -90,12 +101,22 @@ fn parse_one(tid: u32) -> FlatNode {
     } else if (first_b == 64u) {
         // '@' (Element)
         kind = 3u;
+    } else if (first_b == 47u) {
+        // "//" (Comment)
+        if (cursor + 1u < eff_end && get_byte(cursor + 1u) == 47u) {
+            kind = 7u;
+        }
     } else if (first_b == 45u) {
-        // '-' (List) when followed by a blank
+        // '-' (List) when followed by a blank, '-.' (OrderedList) when `.` and a blank follow
         if (cursor + 1u < eff_end) {
             let next_b = get_byte(cursor + 1u);
             if (next_b == 32u || next_b == 9u) {
                 kind = 4u;
+            } else if (next_b == 46u && cursor + 2u < eff_end) {
+                let third_b = get_byte(cursor + 2u);
+                if (third_b == 32u || third_b == 9u) {
+                    kind = 6u;
+                }
             }
         }
     }

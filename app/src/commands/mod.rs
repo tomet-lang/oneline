@@ -1,4 +1,5 @@
 mod bench;
+mod compat;
 mod parse;
 mod profile;
 mod query;
@@ -32,6 +33,19 @@ enum Commands {
         /// Convert to canonical tomet-ast Document and display
         #[arg(long)]
         to_ast: bool,
+    },
+    /// Compare oneline's reading of .tmt documents with tomet's own parser
+    Compat {
+        /// Files or directories (searched recursively for .tmt)
+        paths: Vec<PathBuf>,
+
+        /// Print this many disagreeing chunks per line shape
+        #[arg(long, default_value_t = 0)]
+        show: usize,
+
+        /// Compare this text instead (repeatable; use $'a\nb' in the shell for newlines)
+        #[arg(long)]
+        text: Vec<String>,
     },
     /// Benchmark parsing throughput and latency (file or synthetic dataset)
     Bench {
@@ -100,7 +114,7 @@ enum Commands {
         #[arg(long, default_value = "mixed")]
         profile: DataProfile,
 
-        /// Node kind to query (heading, element, list, connect, text)
+        /// Node kind to query (heading, element, list, ordered-list, connect, comment, text)
         #[arg(short, long, default_value = "heading")]
         kind: String,
 
@@ -121,7 +135,7 @@ enum Commands {
         /// Path to input file (optional if --bench-mb is given)
         file: Option<PathBuf>,
 
-        /// Filter by node kind (heading, element, list, connect, text)
+        /// Filter by node kind (heading, element, list, ordered-list, connect, comment, text)
         #[arg(short, long)]
         kind: Option<String>,
 
@@ -172,6 +186,7 @@ impl From<DataProfile> for Profile {
 pub fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Commands::Parse { file, engine, to_ast } => parse::run_parse(&file, engine, to_ast),
+        Commands::Compat { paths, show, text } => compat::run_compat(&paths, show, &text),
         Commands::Bench { file, synthetic_mb, profile, iterations } => {
             bench::run_bench(file.as_deref(), synthetic_mb, profile.into(), iterations)
         }

@@ -203,7 +203,11 @@ pub fn generate(profile: Profile, target_bytes: usize, seed: u64) -> String {
             }
             23..=37 => {
                 push_prefix(&mut out, depth);
-                out.push_str("- ");
+                if rng.chance(70) {
+                    out.push_str("- ");
+                } else {
+                    out.push_str("-. ");
+                }
                 push_text(&mut out, &mut rng, body_len, vocab.as_deref());
             }
             _ => {

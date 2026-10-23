@@ -16,14 +16,22 @@ pub fn parse_line(line: &[u8], line_start: u32) -> FlatNode {
     }
     let line = &line[..eff];
 
-    // Depth: the run of '|' prefixes.
-    let depth = line.iter().take_while(|&&b| b == b'|').count();
-    // Blanks after the prefix.
-    let rest = &line[depth..];
-    let blanks = rest.iter().take_while(|&&b| b == b' ' || b == b'\t').count();
-    let content = &rest[blanks..];
+    // Depth: `|` prefixes, which blanks may separate (`| | x` is as deep as `|| x`). The blank run
+    // found after the last `|` is the one that precedes the content, so it is counted once.
+    let blank = |b: &u8| *b == b' ' || *b == b'\t';
+    let mut depth = line.iter().take_while(|&&b| b == b'|').count();
+    let mut pos = depth;
+    let mut blanks = line[pos..].iter().take_while(|b| blank(b)).count();
+    while depth > 0 && line.get(pos + blanks) == Some(&b'|') {
+        pos += blanks;
+        let run = line[pos..].iter().take_while(|&&b| b == b'|').count();
+        depth += run;
+        pos += run;
+        blanks = line[pos..].iter().take_while(|b| blank(b)).count();
+    }
+    let content = &line[pos + blanks..];
 
-    let span_start = line_start + (depth + blanks) as u32;
+    let span_start = line_start + (pos + blanks) as u32;
     if content.is_empty() {
         return FlatNode::new(depth as u32, NodeKind::Blank, span_start, 0);
     }
@@ -37,6 +45,7 @@ const FIRST_BYTE: [u8; 256] = {
     t[b':' as usize] = 2;
     t[b'@' as usize] = 3;
     t[b'-' as usize] = 4;
+    t[b'/' as usize] = 5;
     t
 };
 
@@ -52,9 +61,15 @@ fn classify_line(bytes: &[u8]) -> NodeKind {
         2 => NodeKind::Connect,
         // Element: `@card(..)`
         3 => NodeKind::Element,
-        // List item: `- item`
+        // Comment: `// ...` (the whole line)
+        5 => match bytes.get(1) {
+            Some(b'/') => NodeKind::Comment,
+            _ => NodeKind::Text,
+        },
+        // List item: `- item`, or `-. item` (ordered)
         _ => match bytes.get(1) {
             Some(b' ' | b'\t') => NodeKind::List,
+            Some(b'.') if matches!(bytes.get(2), Some(b' ' | b'\t')) => NodeKind::OrderedList,
             _ => NodeKind::Text,
         },
     }
@@ -78,11 +93,23 @@ mod tests {
         if eff_len == 0 {
             return FlatNode::new(0, NodeKind::Blank, line_start, 0);
         }
+        // Written the other way round from `parse_line`: scan byte by byte, remembering where
+        // the last `|` was; a blank run only belongs to the prefix if another `|` follows it.
         let mut depth = 0;
-        while depth < eff_len && line_bytes[depth] == b'|' {
-            depth += 1;
+        let mut prefix_end = 0;
+        let mut i = 0;
+        while i < eff_len {
+            match line_bytes[i] {
+                b'|' => {
+                    depth += 1;
+                    i += 1;
+                    prefix_end = i;
+                }
+                b' ' | b'\t' if depth > 0 => i += 1,
+                _ => break,
+            }
         }
-        let mut content_start = depth;
+        let mut content_start = prefix_end;
         while content_start < eff_len && (line_bytes[content_start] == b' ' || line_bytes[content_start] == b'\t') {
             content_start += 1;
         }
@@ -97,6 +124,8 @@ mod tests {
             b':' => NodeKind::Connect,
             b'@' => NodeKind::Element,
             b'-' if rest.len() > 1 && (rest[1] == b' ' || rest[1] == b'\t') => NodeKind::List,
+            b'-' if rest.len() > 2 && rest[1] == b'.' && (rest[2] == b' ' || rest[2] == b'\t') => NodeKind::OrderedList,
+            b'/' if rest.len() > 1 && rest[1] == b'/' => NodeKind::Comment,
             _ => NodeKind::Text,
         };
         FlatNode::new(depth as u32, kind, span_start, span_len)
@@ -119,7 +148,7 @@ mod tests {
     #[test]
     fn matches_reference_on_all_short_lines() {
         // Exhaustive over a 7-symbol alphabet up to length 6.
-        let alphabet = *b"| -:=@\n";
+        let alphabet = *b"| -.:@/\n";
         fn go(prefix: &mut Vec<u8>, alphabet: &[u8], depth: usize) {
             assert_eq!(parse_line(prefix, 7), reference(prefix, 7), "{prefix:?}");
             if depth == 0 {

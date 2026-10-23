@@ -492,6 +492,13 @@ mod tests {
         assert_eq!(l3.depth, 3);
         assert_eq!(l3.kind(), NodeKind::List);
 
+        let l5 = parse_line(b"|-. Ordered\n", 0);
+        assert_eq!(l5.depth, 1);
+        assert_eq!(l5.kind(), NodeKind::OrderedList);
+        assert_eq!(parse_line(b"-.x\n", 0).kind(), NodeKind::Text);
+        assert_eq!(parse_line(b"|| // c\n", 0).kind(), NodeKind::Comment);
+        assert_eq!(parse_line(b"/x\n", 0).kind(), NodeKind::Text);
+
         let l4 = parse_line(b"|=[ Header ]\n", 0);
         assert_eq!(l4.depth, 1);
         assert_eq!(l4.kind(), NodeKind::Heading);
