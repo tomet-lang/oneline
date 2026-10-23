@@ -71,6 +71,14 @@ enum Commands {
         #[arg(long)]
         bench: bool,
 
+        /// Dictionary search benchmark: N sparse words picked from the text, GPU vs CPU
+        #[arg(long)]
+        dictionary: Option<usize>,
+
+        /// With --dictionary: pick words that are rare in the text (20-1000 estimated hits) instead of 100-20000
+        #[arg(long)]
+        sparse: bool,
+
         /// Capacity for returned occurrence offsets
         #[arg(long, default_value_t = 1 << 20)]
         max_matches: usize,
@@ -167,8 +175,8 @@ pub fn run(cli: Cli) -> Result<()> {
         Commands::Bench { file, synthetic_mb, profile, iterations } => {
             bench::run_bench(file.as_deref(), synthetic_mb, profile.into(), iterations)
         }
-        Commands::Search { file, pattern, bench_mb, profile, bench, max_matches, iterations } => {
-            search::run_search(file.as_deref(), &pattern, bench_mb, profile.into(), max_matches, bench, iterations)
+        Commands::Search { file, pattern, bench_mb, profile, bench, dictionary, sparse, max_matches, iterations } => {
+            search::run_search(file.as_deref(), &pattern, bench_mb, profile.into(), max_matches, bench, dictionary, sparse, iterations)
         }
         Commands::Profile { file, synthetic_kb, profile, kind, max_matches, pattern, iterations } => {
             let kind = query::parse_kind(&kind).with_context(|| format!("unknown kind {kind:?}"))?;
