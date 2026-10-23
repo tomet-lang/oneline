@@ -60,7 +60,17 @@ fn profile_tree(parser: &GpuParser, doc: &oneline_gpu::GpuDocument, content: &st
     for _ in 0..iterations {
         profiles.push(parser.profile_build_tree(doc)?);
     }
-    print_profile("BUILD TREE on resident document (parent + subtree_end)", &profiles);
+    print_profile("BUILD TREE on resident document (new tree; working buffers reused after the first call)", &profiles);
+
+    // Rebuilding into the previous tree's own buffers: nothing is allocated or cleared.
+    let mut previous = Some(parser.build_tree(doc)?);
+    let mut rebuilds = Vec::new();
+    for _ in 0..iterations {
+        let (tree, profile) = parser.profile_build_tree_reusing(doc, previous.take())?;
+        previous = Some(tree);
+        rebuilds.push(profile);
+    }
+    print_profile("REBUILD TREE reusing the previous tree's buffers", &rebuilds);
 
     // The same relations on the CPU, nodes already parsed (parallel ANSV).
     let cpu_tree = oneline_simd::try_parse_par(content)?;

@@ -721,3 +721,46 @@ fn many_patterns_fall_back_when_the_candidate_buffer_overflows() {
     );
     parser.candidate_capacity_cap.store(0, std::sync::atomic::Ordering::Relaxed);
 }
+
+/// Rebuilding into the previous tree's buffers (and the shared working buffers) must give the same
+/// answer as a fresh build, whatever stale contents the buffers hold: bigger then smaller then bigger
+/// documents, the same document twice, and a failed build in between.
+#[test]
+fn gpu_tree_reuse_matches_fresh_builds() {
+    use crate::GpuTree;
+    let parser = gpu!();
+    let docs: Vec<(String, String)> = vec![
+        ("nested 3MB".into(), datagen::generate(Profile::Nested, 3 << 20, 1)),
+        ("mixed 600KB (smaller: reuses the buffers)".into(), datagen::generate(Profile::Mixed, 600 << 10, 2)),
+        ("prose 6MB (bigger: must reallocate)".into(), datagen::generate(Profile::Prose, 6 << 20, 3)),
+        ("nested 3MB again".into(), datagen::generate(Profile::Nested, 3 << 20, 1)),
+        ("tiny".into(), "| a\n|| b\n".into()),
+        ("empty".into(), String::new()),
+        ("nested 3MB after empty".into(), datagen::generate(Profile::Nested, 3 << 20, 4)),
+    ];
+    let mut tree: Option<GpuTree> = None;
+    for (name, text) in &docs {
+        let doc = parser.upload(text).unwrap();
+        // A document the kernels refuse, followed by one that REUSES the working buffers (so a stale error
+        // flag would show): it must not poison them.
+        if name == "tiny" {
+            let deep = parser.upload(&format!("{} x\n", "|".repeat(40))).unwrap();
+            assert!(parser.build_tree_reusing(&deep, tree.take()).is_err());
+        }
+        let rebuilt = parser.build_tree_reusing(&doc, tree.take()).unwrap();
+        let cpu = oneline_simd::build_links(&oneline_simd::parse(text).nodes);
+        assert_eq!(rebuilt.line_count(), cpu.len(), "{name}");
+        assert!(parser.download_links(&rebuilt).unwrap() == cpu, "{name}: reused build differs from the CPU");
+        // A fresh build of the same document must agree too.
+        let fresh = parser.build_tree(&doc).unwrap();
+        assert!(parser.download_links(&fresh).unwrap() == cpu, "{name}: fresh build differs from the CPU");
+        // Subtree queries on a reused tree read only the first line_count entries.
+        if cpu.len() > 10 {
+            let root = cpu.len() / 3;
+            let want: Vec<u32> = cpu.subtree(root).map(|i| i as u32).collect();
+            let got = parser.query_subtree(&doc, &rebuilt, root, None, None, cpu.len()).unwrap();
+            assert_eq!(got.indices, want, "{name}: subtree query on a reused tree");
+        }
+        tree = Some(rebuilt);
+    }
+}

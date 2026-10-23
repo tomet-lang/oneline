@@ -33,6 +33,8 @@ pub(crate) struct TreePipelines {
 /// `subtree_end == i + 1`).
 pub struct GpuTree {
     line_count: u32,
+    /// Lines the output buffers can hold (>= line_count), so a later build can reuse them.
+    capacity: u32,
     pub(crate) parent: wgpu::Buffer,
     pub(crate) subtree_end: wgpu::Buffer,
 }
@@ -49,46 +51,78 @@ impl GpuParser {
     /// Fails if a non-blank line is nested deeper than [`MAX_TREE_DEPTH`] - 1 levels (use
     /// the CPU `oneline_simd::build_links` then).
     pub fn build_tree(&self, doc: &GpuDocument) -> Result<GpuTree> {
-        self.build_tree_inner(doc, None)
+        self.build_tree_inner(doc, None, None)
+    }
+
+    /// Like [`build_tree`](Self::build_tree), but reuses the output buffers of `previous` when they
+    /// are large enough, so rebuilding for a new or edited document of similar size allocates (and
+    /// clears) nothing. The working buffers are always reused across calls.
+    pub fn build_tree_reusing(&self, doc: &GpuDocument, previous: Option<GpuTree>) -> Result<GpuTree> {
+        self.build_tree_inner(doc, previous, None)
+    }
+
+    /// `build_tree_reusing`, with a breakdown of where the time went.
+    pub fn profile_build_tree_reusing(
+        &self,
+        doc: &GpuDocument,
+        previous: Option<GpuTree>,
+    ) -> Result<(GpuTree, Profile)> {
+        let timer = StageTimer::new(self);
+        let tree = self.build_tree_inner(doc, previous, Some(&timer))?;
+        Ok((tree, timer.finish(self)?))
     }
 
     /// `build_tree`, with a breakdown of where the time went.
     pub fn profile_build_tree(&self, doc: &GpuDocument) -> Result<Profile> {
-        let timer = StageTimer::new(self);
-        self.build_tree_inner(doc, Some(&timer))?;
-        timer.finish(self)
+        Ok(self.profile_build_tree_reusing(doc, None)?.1)
     }
 
-    fn build_tree_inner(&self, doc: &GpuDocument, timer: Option<&StageTimer>) -> Result<GpuTree> {
+    fn build_tree_inner(
+        &self,
+        doc: &GpuDocument,
+        previous: Option<GpuTree>,
+        timer: Option<&StageTimer>,
+    ) -> Result<GpuTree> {
         let n = doc.line_count() as u32;
         let Some(nodes) = doc.nodes_buffer() else {
             // Empty document: nothing to compute, but keep the type uniform.
             let empty = || self.storage_scratch("Empty Tree Buffer", 4);
-            return Ok(GpuTree { line_count: 0, parent: empty(), subtree_end: empty() });
+            return Ok(GpuTree { line_count: 0, capacity: 0, parent: empty(), subtree_end: empty() });
         };
         let runs = n.div_ceil(RUN);
         let links_bytes = u64::from(n) * 4;
-        let summary_bytes = u64::from(runs) * u64::from(MAX_TREE_DEPTH) * 4;
         self.check_fits(links_bytes, "the tree links")?;
-        self.check_fits(summary_bytes, "the tree run summaries")?;
 
-        let cfg = self.uniform("Tree Config Buffer", &TreeConfig { line_count: n, runs, _pad: [0; 2] });
-        let summary = self.storage_scratch("Tree Run Summary Buffer", summary_bytes);
-        let scanned = self.storage_scratch("Tree Run Start Buffer", summary_bytes);
-        let keys = self.storage_scratch("Tree Key Bytes Buffer", u64::from(n.div_ceil(4)) * 4);
-        let status = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Tree Status Buffer"),
-            size: 8, // [error flag, deepest line]
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-        let parent = self.storage_scratch_copy("Tree Parent Buffer", links_bytes);
-        let subtree_end = self.storage_scratch_copy("Tree Subtree End Buffer", links_bytes);
+        // Output buffers: the previous tree's when they fit, else new ones.
+        let (parent, subtree_end, capacity) = match previous {
+            Some(t) if t.capacity >= n => (t.parent, t.subtree_end, t.capacity),
+            _ => (
+                self.storage_scratch_copy("Tree Parent Buffer", links_bytes),
+                self.storage_scratch_copy("Tree Subtree End Buffer", links_bytes),
+                n,
+            ),
+        };
+
+        // Working buffers: kept across calls, grown when a bigger document comes.
+        let mut guard = self.tree_scratch.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.as_ref().is_none_or(|s| s.line_capacity < n) {
+            *guard = Some(self.new_tree_scratch(n)?);
+        }
+        let scratch = guard.as_ref().expect("just ensured");
+        self.queue.write_buffer(&scratch.cfg, 0, bytemuck::bytes_of(&TreeConfig { line_count: n, runs, _pad: [0; 2] }));
+        self.queue.write_buffer(&scratch.status, 0, &[0u8; 8]);
 
         let group0 = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Tree Bind Group 0"),
             layout: &self.tree_layout0,
-            entries: &[bind(0, nodes), bind(1, &cfg), bind(2, &summary), bind(3, &scanned), bind(4, &status), bind(5, &keys)],
+            entries: &[
+                bind(0, nodes),
+                bind(1, &scratch.cfg),
+                bind(2, &scratch.summary),
+                bind(3, &scratch.scanned),
+                bind(4, &scratch.status),
+                bind(5, &scratch.keys),
+            ],
         });
         let out_group = |label: &str, buffer: &wgpu::Buffer| {
             self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -99,8 +133,7 @@ impl GpuParser {
         };
         let parent_group = out_group("Tree Parent Output", &parent);
         let end_group = out_group("Tree Subtree End Output", &subtree_end);
-        let staging = staging_buffer(&self.device, "Tree Status Staging Buffer", 4);
-        mark(timer, "tree: create buffers + bind groups");
+        mark(timer, "tree: prepare buffers + bind groups");
 
         let run_dims = dispatch_dims(runs.div_ceil(RUNS_PER_GROUP));
         let key_dims = dispatch_dims(n.div_ceil(4).div_ceil(256));
@@ -128,12 +161,12 @@ impl GpuParser {
             }
             pass.dispatch_workgroups(groups.0, groups.1, 1);
         }
-        encoder.copy_buffer_to_buffer(&status, 0, &staging, 0, 4);
+        encoder.copy_buffer_to_buffer(&scratch.status, 0, &scratch.staging, 0, 4);
         self.queue.submit(Some(encoder.finish()));
         mark(timer, "tree: encode + submit");
 
-        map_all(&self.device, &[&staging])?;
-        let flag = take_mapped::<u32>(&staging, 1)[0];
+        map_all(&self.device, &[&scratch.staging])?;
+        let flag = take_mapped::<u32>(&scratch.staging, 1)[0];
         mark(timer, "tree: wait for GPU + read status");
         if flag != 0 {
             return Err(anyhow!(
@@ -141,7 +174,29 @@ impl GpuParser {
                  the GPU tree kernels track {MAX_TREE_DEPTH} levels (use oneline_simd::build_links)"
             ));
         }
-        Ok(GpuTree { line_count: n, parent, subtree_end })
+        Ok(GpuTree { line_count: n, capacity, parent, subtree_end })
+    }
+
+    /// Working buffers for documents of up to `lines` lines (rounded up, so a slightly bigger
+    /// document does not reallocate).
+    fn new_tree_scratch(&self, lines: u32) -> Result<TreeScratch> {
+        let line_capacity = lines.next_multiple_of(1 << 16).max(1 << 16);
+        let runs = line_capacity.div_ceil(RUN);
+        let summary_bytes = u64::from(runs) * u64::from(MAX_TREE_DEPTH) * 4;
+        self.check_fits(summary_bytes, "the tree run summaries")?;
+        let rw = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST;
+        let buffer = |label: &str, size: u64, usage: wgpu::BufferUsages| {
+            self.device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: size.max(4), usage, mapped_at_creation: false })
+        };
+        Ok(TreeScratch {
+            line_capacity,
+            summary: buffer("Tree Run Summary Buffer", summary_bytes, wgpu::BufferUsages::STORAGE),
+            scanned: buffer("Tree Run Start Buffer", summary_bytes, wgpu::BufferUsages::STORAGE),
+            keys: buffer("Tree Key Bytes Buffer", u64::from(line_capacity.div_ceil(4)) * 4, wgpu::BufferUsages::STORAGE),
+            status: buffer("Tree Status Buffer", 8, rw), // [error flag, deepest line]
+            cfg: buffer("Tree Config Buffer", std::mem::size_of::<TreeConfig>() as u64, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST),
+            staging: staging_buffer(&self.device, "Tree Status Staging Buffer", 4),
+        })
     }
 
     /// Reads the tree links back to the host (for checking, or to hand to the CPU).
@@ -217,3 +272,14 @@ struct TreeConfig {
 
 /// `NONE` as the shaders use it.
 const _: () = assert!(NONE == 0xFFFF_FFFF);
+
+/// Working buffers of the tree kernels, kept between builds.
+pub(crate) struct TreeScratch {
+    line_capacity: u32,
+    summary: wgpu::Buffer,
+    scanned: wgpu::Buffer,
+    keys: wgpu::Buffer,
+    status: wgpu::Buffer,
+    cfg: wgpu::Buffer,
+    staging: wgpu::Buffer,
+}

@@ -45,6 +45,8 @@ pub struct GpuParser {
     pub(crate) tree: crate::tree::TreePipelines,
     pub(crate) tree_layout0: wgpu::BindGroupLayout,
     pub(crate) tree_layout1: wgpu::BindGroupLayout,
+    /// Reusable working buffers of the tree kernels.
+    pub(crate) tree_scratch: std::sync::Mutex<Option<crate::tree::TreeScratch>>,
 
     // Stage 1 prefix-scan pipelines (`scan.wgsl`).
     pub(crate) scan_count_pipeline: wgpu::ComputePipeline,
@@ -317,6 +319,7 @@ impl GpuParser {
             tree,
             tree_layout0,
             tree_layout1,
+            tree_scratch: std::sync::Mutex::new(None),
             scan_count_pipeline,
             scan_blocks_pipeline,
             scan_scatter_pipeline,
