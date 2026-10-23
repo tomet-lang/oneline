@@ -885,6 +885,7 @@ dependencies = [
 name = "oneline-simd"
 version = "0.1.0"
 dependencies = [
+ "aho-corasick",
  "anyhow",
  "memchr",
  "oneline-core",

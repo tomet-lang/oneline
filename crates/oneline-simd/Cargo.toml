@@ -10,3 +10,4 @@ oneline-core = { workspace = true }
 anyhow = { workspace = true }
 rayon = { workspace = true }
 memchr = { workspace = true }
+aho-corasick = { workspace = true }

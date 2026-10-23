@@ -165,3 +165,111 @@ mod tests {
         }
     }
 }
+
+// ---- many patterns ----------------------------------------------------------
+
+use aho_corasick::{AhoCorasick, AhoCorasickKind, MatchKind};
+
+/// One occurrence of one of several patterns: which pattern, and where it starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PatternHit {
+    pub pattern: u32,
+    pub offset: u32,
+}
+
+/// The CPU baseline for dictionary search: `aho-corasick` (the crate behind ripgrep's
+/// multi-pattern search), as a DFA, run on all cores over overlapping chunks.
+pub struct ManyPatterns {
+    automaton: AhoCorasick,
+    longest: usize,
+}
+
+impl ManyPatterns {
+    /// # Panics
+    /// If `patterns` is empty or contains an empty pattern.
+    pub fn new<P: AsRef<[u8]>>(patterns: &[P]) -> Self {
+        assert!(!patterns.is_empty() && patterns.iter().all(|p| !p.as_ref().is_empty()), "need non-empty patterns");
+        let automaton = AhoCorasick::builder()
+            // Report every occurrence of every pattern, including overlapping ones, as the GPU does.
+            .match_kind(MatchKind::Standard)
+            .kind(Some(AhoCorasickKind::DFA))
+            .build(patterns)
+            .expect("aho-corasick build");
+        let longest = patterns.iter().map(|p| p.as_ref().len()).max().unwrap();
+        Self { automaton, longest }
+    }
+
+    /// Number of occurrences of each pattern, all cores.
+    pub fn count_par(&self, text: &[u8], pattern_count: usize) -> Vec<u64> {
+        let chunk = (text.len() / (rayon::current_num_threads() * 4)).max(MIN_CHUNK);
+        (0..text.len())
+            .step_by(chunk)
+            .collect::<Vec<_>>()
+            .par_iter()
+            .map(|&start| {
+                let end = (start + chunk).min(text.len());
+                let window = &text[start..(end + self.longest - 1).min(text.len())];
+                let mut counts = vec![0u64; pattern_count];
+                for m in self.automaton.find_overlapping_iter(window) {
+                    // A match must start inside this chunk; the extension past `end` only
+                    // exists so matches that begin before `end` can finish.
+                    if m.start() < end - start {
+                        counts[m.pattern().as_usize()] += 1;
+                    }
+                }
+                counts
+            })
+            .reduce(
+                || vec![0u64; pattern_count],
+                |mut a, b| {
+                    a.iter_mut().zip(&b).for_each(|(x, y)| *x += y);
+                    a
+                },
+            )
+    }
+
+    /// Every occurrence, sorted by `(pattern, offset)`, all cores.
+    pub fn find_all_par(&self, text: &[u8]) -> Vec<PatternHit> {
+        let chunk = (text.len() / (rayon::current_num_threads() * 4)).max(MIN_CHUNK);
+        let mut hits: Vec<PatternHit> = (0..text.len())
+            .step_by(chunk)
+            .collect::<Vec<_>>()
+            .par_iter()
+            .flat_map_iter(|&start| {
+                let end = (start + chunk).min(text.len());
+                let window = &text[start..(end + self.longest - 1).min(text.len())];
+                let mut out = Vec::new();
+                for m in self.automaton.find_overlapping_iter(window) {
+                    if m.start() < end - start {
+                        out.push(PatternHit { pattern: m.pattern().as_u32(), offset: (start + m.start()) as u32 });
+                    }
+                }
+                out
+            })
+            .collect();
+        hits.par_sort_unstable();
+        hits
+    }
+}
+
+#[cfg(test)]
+mod many_tests {
+    use super::*;
+    use oneline_core::datagen::{self, Profile};
+
+    #[test]
+    fn many_patterns_match_single_pattern_search() {
+        let text = datagen::generate(Profile::Prose, 3 << 20, 8);
+        let v = datagen::prose_vocabulary();
+        let patterns: Vec<Vec<u8>> = [0usize, 1, 5, 200, 3500, 4000].iter().map(|&i| v[i].as_bytes().to_vec()).chain([b"|".to_vec(), b"- ".to_vec()]).collect();
+        let many = ManyPatterns::new(&patterns);
+        let hits = many.find_all_par(text.as_bytes());
+        let counts = many.count_par(text.as_bytes(), patterns.len());
+        for (i, p) in patterns.iter().enumerate() {
+            let want = find_all(text.as_bytes(), p);
+            let got: Vec<u32> = hits.iter().filter(|h| h.pattern as usize == i).map(|h| h.offset).collect();
+            assert_eq!(got, want, "pattern {i} ({:?})", String::from_utf8_lossy(p));
+            assert_eq!(counts[i] as usize, want.len());
+        }
+    }
+}
