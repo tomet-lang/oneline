@@ -59,7 +59,6 @@ pub fn find_all_par(text: &[u8], pattern: &[u8]) -> Vec<u32> {
     try_find_all_par(text, pattern).expect("find_all_par")
 }
 
-
 /// Number of (overlapping) occurrences of `pattern` in `text`, using all cores,
 /// without materializing the offsets. The CPU counterpart of a GPU count-only search.
 pub fn count_all_par(text: &[u8], pattern: &[u8]) -> usize {
@@ -118,7 +117,11 @@ mod tests {
     fn count_matches_find_all() {
         let text = datagen::generate(Profile::Prose, 3 << 20, 4);
         for p in ["a", "ab", "the", "xyzzy-absent", "\n|"] {
-            assert_eq!(count_all_par(text.as_bytes(), p.as_bytes()), find_all(text.as_bytes(), p.as_bytes()).len(), "{p:?}");
+            assert_eq!(
+                count_all_par(text.as_bytes(), p.as_bytes()),
+                find_all(text.as_bytes(), p.as_bytes()).len(),
+                "{p:?}"
+            );
         }
         assert_eq!(count_all_par(b"aaaa", b"aa"), 3);
     }
@@ -136,9 +139,18 @@ mod tests {
     #[test]
     fn parallel_matches_naive_on_all_chunk_boundaries() {
         // Patterns that straddle every 1 MiB chunk boundary: dense, overlapping hits.
-        let text: Vec<u8> = b"ab".iter().copied().cycle().take(5 * MIN_CHUNK + 17).collect();
+        let text: Vec<u8> = b"ab"
+            .iter()
+            .copied()
+            .cycle()
+            .take(5 * MIN_CHUNK + 17)
+            .collect();
         for pattern in [&b"ab"[..], b"aba", b"bab", b"ababab", b"x"] {
-            assert_eq!(find_all_par(&text, pattern), naive(&text, pattern), "pattern {pattern:?}");
+            assert_eq!(
+                find_all_par(&text, pattern),
+                naive(&text, pattern),
+                "pattern {pattern:?}"
+            );
         }
     }
 
@@ -148,11 +160,19 @@ mod tests {
         for profile in Profile::ALL {
             let text = datagen::generate(profile, 3 << 20, 5);
             let bytes = text.as_bytes();
-            let mut patterns: Vec<Vec<u8>> =
-                ["lorem", "SIMD GPU", "naïve", "|", "||", "\n|", "階層 解析", "- "]
-                    .iter()
-                    .map(|s| s.as_bytes().to_vec())
-                    .collect();
+            let mut patterns: Vec<Vec<u8>> = [
+                "lorem",
+                "SIMD GPU",
+                "naïve",
+                "|",
+                "||",
+                "\n|",
+                "階層 解析",
+                "- ",
+            ]
+            .iter()
+            .map(|s| s.as_bytes().to_vec())
+            .collect();
             // Random slices of the text itself: guaranteed to occur at least once.
             for _ in 0..4 {
                 let len = rng.range(1, 65) as usize;
@@ -160,7 +180,11 @@ mod tests {
                 patterns.push(bytes[at..at + len].to_vec());
             }
             for p in patterns {
-                assert_eq!(find_all_par(bytes, &p), naive(bytes, &p), "{profile:?} {p:?}");
+                assert_eq!(
+                    find_all_par(bytes, &p),
+                    naive(bytes, &p),
+                    "{profile:?} {p:?}"
+                );
             }
         }
     }
@@ -188,7 +212,10 @@ impl ManyPatterns {
     /// # Panics
     /// If `patterns` is empty or contains an empty pattern.
     pub fn new<P: AsRef<[u8]>>(patterns: &[P]) -> Self {
-        assert!(!patterns.is_empty() && patterns.iter().all(|p| !p.as_ref().is_empty()), "need non-empty patterns");
+        assert!(
+            !patterns.is_empty() && patterns.iter().all(|p| !p.as_ref().is_empty()),
+            "need non-empty patterns"
+        );
         let automaton = AhoCorasick::builder()
             // Report every occurrence of every pattern, including overlapping ones, as the GPU does.
             .match_kind(MatchKind::Standard)
@@ -241,7 +268,10 @@ impl ManyPatterns {
                 let mut out = Vec::new();
                 for m in self.automaton.find_overlapping_iter(window) {
                     if m.start() < end - start {
-                        out.push(PatternHit { pattern: m.pattern().as_u32(), offset: (start + m.start()) as u32 });
+                        out.push(PatternHit {
+                            pattern: m.pattern().as_u32(),
+                            offset: (start + m.start()) as u32,
+                        });
                     }
                 }
                 out
@@ -261,13 +291,21 @@ mod many_tests {
     fn many_patterns_match_single_pattern_search() {
         let text = datagen::generate(Profile::Prose, 3 << 20, 8);
         let v = datagen::prose_vocabulary();
-        let patterns: Vec<Vec<u8>> = [0usize, 1, 5, 200, 3500, 4000].iter().map(|&i| v[i].as_bytes().to_vec()).chain([b"|".to_vec(), b"- ".to_vec()]).collect();
+        let patterns: Vec<Vec<u8>> = [0usize, 1, 5, 200, 3500, 4000]
+            .iter()
+            .map(|&i| v[i].as_bytes().to_vec())
+            .chain([b"|".to_vec(), b"- ".to_vec()])
+            .collect();
         let many = ManyPatterns::new(&patterns);
         let hits = many.find_all_par(text.as_bytes());
         let counts = many.count_par(text.as_bytes(), patterns.len());
         for (i, p) in patterns.iter().enumerate() {
             let want = find_all(text.as_bytes(), p);
-            let got: Vec<u32> = hits.iter().filter(|h| h.pattern as usize == i).map(|h| h.offset).collect();
+            let got: Vec<u32> = hits
+                .iter()
+                .filter(|h| h.pattern as usize == i)
+                .map(|h| h.offset)
+                .collect();
             assert_eq!(got, want, "pattern {i} ({:?})", String::from_utf8_lossy(p));
             assert_eq!(counts[i] as usize, want.len());
         }

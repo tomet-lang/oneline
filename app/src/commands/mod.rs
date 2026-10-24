@@ -13,7 +13,12 @@ use clap::{Parser, Subcommand, ValueEnum};
 use oneline_core::datagen::Profile;
 
 #[derive(Parser)]
-#[command(name = "oneline", author, version, about = "High-performance SIMD/GPU parser for oneline format")]
+#[command(
+    name = "oneline",
+    author,
+    version,
+    about = "High-performance SIMD/GPU parser for oneline format"
+)]
 pub struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -185,28 +190,83 @@ impl From<DataProfile> for Profile {
 
 pub fn run(cli: Cli) -> Result<()> {
     match cli.command {
-        Commands::Parse { file, engine, to_ast } => parse::run_parse(&file, engine, to_ast),
+        Commands::Parse {
+            file,
+            engine,
+            to_ast,
+        } => parse::run_parse(&file, engine, to_ast),
         Commands::Compat { paths, show, text } => compat::run_compat(&paths, show, &text),
-        Commands::Bench { file, synthetic_mb, profile, iterations } => {
-            bench::run_bench(file.as_deref(), synthetic_mb, profile.into(), iterations)
+        Commands::Bench {
+            file,
+            synthetic_mb,
+            profile,
+            iterations,
+        } => bench::run_bench(file.as_deref(), synthetic_mb, profile.into(), iterations),
+        Commands::Search {
+            file,
+            pattern,
+            bench_mb,
+            profile,
+            bench,
+            dictionary,
+            sparse,
+            max_matches,
+            iterations,
+        } => search::run_search(
+            file.as_deref(),
+            &pattern,
+            bench_mb,
+            profile.into(),
+            max_matches,
+            bench,
+            dictionary,
+            sparse,
+            iterations,
+        ),
+        Commands::Profile {
+            file,
+            synthetic_kb,
+            profile,
+            kind,
+            max_matches,
+            pattern,
+            iterations,
+        } => {
+            let kind =
+                query::parse_kind(&kind).with_context(|| format!("unknown kind {kind:?}"))?;
+            profile::run_profile(
+                file.as_deref(),
+                synthetic_kb,
+                profile.into(),
+                Some(kind),
+                iterations,
+                max_matches,
+                pattern.as_deref(),
+            )
         }
-        Commands::Search { file, pattern, bench_mb, profile, bench, dictionary, sparse, max_matches, iterations } => {
-            search::run_search(file.as_deref(), &pattern, bench_mb, profile.into(), max_matches, bench, dictionary, sparse, iterations)
-        }
-        Commands::Profile { file, synthetic_kb, profile, kind, max_matches, pattern, iterations } => {
-            let kind = query::parse_kind(&kind).with_context(|| format!("unknown kind {kind:?}"))?;
-            profile::run_profile(file.as_deref(), synthetic_kb, profile.into(), Some(kind), iterations, max_matches, pattern.as_deref())
-        }
-        Commands::Query { file, kind, depth, bench_mb, profile } => {
-            query::run_query(file.as_deref(), kind.as_deref(), depth, bench_mb, profile.into())
-        }
+        Commands::Query {
+            file,
+            kind,
+            depth,
+            bench_mb,
+            profile,
+        } => query::run_query(
+            file.as_deref(),
+            kind.as_deref(),
+            depth,
+            bench_mb,
+            profile.into(),
+        ),
     }
 }
 
 /// Median wall-clock time of `f` over `iterations` runs, after one warm-up. The median,
 /// not the mean: one scheduling hiccup (another process, a driver thread) can make a
 /// single run several times slower, and a mean would report it.
-pub(crate) fn time_median<R>(iterations: usize, mut f: impl FnMut() -> Result<R>) -> Result<Duration> {
+pub(crate) fn time_median<R>(
+    iterations: usize,
+    mut f: impl FnMut() -> Result<R>,
+) -> Result<Duration> {
     f()?;
     let mut times = Vec::with_capacity(iterations.max(1));
     for _ in 0..iterations.max(1) {
@@ -226,7 +286,9 @@ pub(crate) fn report(label: &str, bytes: usize, avg: Duration) {
 /// Prints the process's peak resident memory (Linux; silent elsewhere). Large-input
 /// runs need this: the text, parse results and the driver's staging copies add up.
 pub(crate) fn print_peak_rss() {
-    let Ok(status) = std::fs::read_to_string("/proc/self/status") else { return };
+    let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
+        return;
+    };
     if let Some(kb) = status
         .lines()
         .find_map(|l| l.strip_prefix("VmHWM:"))

@@ -47,7 +47,10 @@ impl StageTimer {
     }
 
     /// Timestamp slots for the next compute pass (`None` without timestamp support).
-    pub(crate) fn writes(&self, label: &'static str) -> Option<wgpu::ComputePassTimestampWrites<'_>> {
+    pub(crate) fn writes(
+        &self,
+        label: &'static str,
+    ) -> Option<wgpu::ComputePassTimestampWrites<'_>> {
         let query_set = self.query_set.as_ref()?;
         let i = self.next.get();
         if i + 2 > MAX_QUERIES {
@@ -65,7 +68,10 @@ impl StageTimer {
     pub(crate) fn finish(self, parser: &GpuParser) -> Result<Profile> {
         let marks = self.marks.borrow();
         let wall = marks.last().unwrap().1 - marks.first().unwrap().1;
-        let host_steps = marks.windows(2).map(|w| (w[1].0, w[1].1 - w[0].1)).collect();
+        let host_steps = marks
+            .windows(2)
+            .map(|w| (w[1].0, w[1].1 - w[0].1))
+            .collect();
 
         let mut gpu_passes = Vec::new();
         let n = self.next.get();
@@ -90,7 +96,11 @@ impl StageTimer {
                 gpu_passes.push((*label, Duration::from_nanos((dt as f64 * period) as u64)));
             }
         }
-        Ok(Profile { wall, host_steps, gpu_passes })
+        Ok(Profile {
+            wall,
+            host_steps,
+            gpu_passes,
+        })
     }
 }
 

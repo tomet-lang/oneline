@@ -58,13 +58,19 @@ impl GpuParser {
     fn upload_inner(&self, input: &str, timer: Option<&StageTimer>) -> Result<GpuDocument> {
         check_gpu_len(input.len())?;
         if input.is_empty() {
-            return Ok(GpuDocument { text_len: 0, line_count: 0, byte_freq: Box::new([0; 256]), resident: None });
+            return Ok(GpuDocument {
+                text_len: 0,
+                line_count: 0,
+                byte_freq: Box::new([0; 256]),
+                resident: None,
+            });
         }
         let text_len = input.len() as u32;
 
         let input_buffer = self.upload_text(input, timer)?;
         let (line_offsets, line_count) = self.scan_to_buffer(&input_buffer, text_len, timer)?;
-        let parsed = self.parse_to_buffer(&input_buffer, &line_offsets, line_count, text_len, timer)?;
+        let parsed =
+            self.parse_to_buffer(&input_buffer, &line_offsets, line_count, text_len, timer)?;
         let text_group = self.text_bind_group(&input_buffer);
 
         let byte_freq = sample_byte_histogram(input.as_bytes());
@@ -74,7 +80,12 @@ impl GpuParser {
             text_len,
             line_count,
             byte_freq,
-            resident: Some(Resident { parsed, text_group, _input: input_buffer, _line_offsets: line_offsets }),
+            resident: Some(Resident {
+                parsed,
+                text_group,
+                _input: input_buffer,
+                _line_offsets: line_offsets,
+            }),
         })
     }
 
@@ -99,7 +110,10 @@ impl GpuParser {
         timer: Option<&StageTimer>,
     ) -> Result<QueryResult> {
         match &doc.resident {
-            None => Ok(QueryResult { total_matches: 0, indices: Vec::new() }),
+            None => Ok(QueryResult {
+                total_matches: 0,
+                indices: Vec::new(),
+            }),
             Some(r) => self.run_query(
                 &self.filter_pipeline,
                 &r.parsed.bind_group,
@@ -158,8 +172,19 @@ impl GpuParser {
         max_matches: usize,
     ) -> Result<QueryResult> {
         match &doc.resident {
-            None => Ok(QueryResult { total_matches: 0, indices: Vec::new() }),
-            Some(r) => self.run_query(&self.filter_pipeline, &r.parsed.bind_group, range, kind, depth, max_matches, None),
+            None => Ok(QueryResult {
+                total_matches: 0,
+                indices: Vec::new(),
+            }),
+            Some(r) => self.run_query(
+                &self.filter_pipeline,
+                &r.parsed.bind_group,
+                range,
+                kind,
+                depth,
+                max_matches,
+                None,
+            ),
         }
     }
 }

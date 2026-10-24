@@ -20,19 +20,33 @@ fn gpu_stages(c: &mut Criterion) {
         g.bench_with_input(BenchmarkId::new("scan_line_offsets", &id), &text, |b, t| {
             b.iter_with_large_drop(|| parser.scan_line_offsets(t).unwrap())
         });
-        g.bench_with_input(BenchmarkId::new("parse_raw_one_shot", &id), &text, |b, t| {
-            b.iter_with_large_drop(|| parser.parse_raw(t).unwrap())
-        });
-        g.bench_with_input(BenchmarkId::new("query_raw_one_shot_fused", &id), &text, |b, t| {
-            b.iter(|| parser.query_raw(t, Some(NodeKind::Heading), None, 1024).unwrap())
-        });
+        g.bench_with_input(
+            BenchmarkId::new("parse_raw_one_shot", &id),
+            &text,
+            |b, t| b.iter_with_large_drop(|| parser.parse_raw(t).unwrap()),
+        );
+        g.bench_with_input(
+            BenchmarkId::new("query_raw_one_shot_fused", &id),
+            &text,
+            |b, t| {
+                b.iter(|| {
+                    parser
+                        .query_raw(t, Some(NodeKind::Heading), None, 1024)
+                        .unwrap()
+                })
+            },
+        );
         g.bench_with_input(BenchmarkId::new("upload_resident", &id), &text, |b, t| {
             b.iter_with_large_drop(|| parser.upload(t).unwrap())
         });
 
         let doc = parser.upload(&text).unwrap();
         g.bench_function(BenchmarkId::new("query_resident", &id), |b| {
-            b.iter(|| parser.query_document(&doc, Some(NodeKind::Heading), None, 1024).unwrap())
+            b.iter(|| {
+                parser
+                    .query_document(&doc, Some(NodeKind::Heading), None, 1024)
+                    .unwrap()
+            })
         });
     }
     g.finish();

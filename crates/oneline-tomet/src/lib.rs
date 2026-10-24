@@ -3,9 +3,7 @@ pub mod compat;
 use anyhow::Result;
 use oneline_core::{FlatNode, FlatTree, NONE, NodeKind, TreeLinks};
 use rayon::prelude::*;
-use tomet_ast::{
-    Block, Document, Inline, List, Paragraph, Section, Span, Text,
-};
+use tomet_ast::{Block, Document, Inline, List, Paragraph, Section, Span, Text};
 
 /// Converts FlatTree into a canonical tomet AST (tomet_ast::Document).
 ///
@@ -19,7 +17,11 @@ pub fn to_tomet_ast(tree: &FlatTree) -> Result<Document> {
 
 /// Like [`to_tomet_ast`] with precomputed links (e.g. when they are reused for queries).
 pub fn to_tomet_ast_with_links(tree: &FlatTree, links: &TreeLinks) -> Result<Document> {
-    assert_eq!(tree.nodes.len(), links.len(), "links do not belong to this tree");
+    assert_eq!(
+        tree.nodes.len(),
+        links.len(),
+        "links do not belong to this tree"
+    );
     let n = tree.nodes.len();
 
     // tomet gives `|` lines a meaning only below an element, and a line with nothing on it ends that
@@ -40,7 +42,11 @@ pub fn to_tomet_ast_with_links(tree: &FlatTree, links: &TreeLinks) -> Result<Doc
             if raw_text.is_empty() {
                 return None;
             }
-            Some(if literal[i] { literal_block(tree, i) } else { parse_line_to_block(node, raw_text) })
+            Some(if literal[i] {
+                literal_block(tree, i)
+            } else {
+                parse_line_to_block(node, raw_text)
+            })
         })
         .collect();
 
@@ -108,14 +114,20 @@ fn literal_pipe_lines(tree: &FlatTree, links: &TreeLinks) -> (Vec<bool>, Vec<u32
 /// prefix included, goes through tomet's own inline parsing.
 fn literal_block(tree: &FlatTree, i: usize) -> Block {
     let start = tree.line_offsets[i] as usize;
-    let end = tree.line_offsets.get(i + 1).map_or(tree.source.len(), |&e| e as usize);
+    let end = tree
+        .line_offsets
+        .get(i + 1)
+        .map_or(tree.source.len(), |&e| e as usize);
     let line = tree.source[start..end].trim_end_matches(['\r', '\n']);
     if let Ok(doc) = tomet_parser::parse_document(line) {
         if let Some(first_block) = doc.blocks.into_iter().next() {
             return first_block;
         }
     }
-    Block::Paragraph(Paragraph::new(vec![Inline::Text(Text::new(line, Span::dummy()))], Span::dummy()))
+    Block::Paragraph(Paragraph::new(
+        vec![Inline::Text(Text::new(line, Span::dummy()))],
+        Span::dummy(),
+    ))
 }
 
 /// Puts every block that follows a heading, up to the next heading of the same or a lower level,
@@ -161,7 +173,11 @@ fn parse_line_to_block(node: &FlatNode, text: &str) -> Block {
                 }
             }
             let level = text.chars().take_while(|&c| c == '=').count().max(1);
-            let title_text = text.trim_start_matches('=').trim_start_matches('[').trim_end_matches(']').trim();
+            let title_text = text
+                .trim_start_matches('=')
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .trim();
             let inline = Inline::Text(Text::new(title_text, Span::dummy()));
             Block::Section(Section::new(level, vec![inline], Span::dummy()))
         }
@@ -226,7 +242,9 @@ fn finish(block: Block, children: Vec<Block>) -> Vec<Block> {
                     Block::Paragraph(child_p) => {
                         paragraph
                             .content
-                            .push(Inline::SoftBreak(tomet_ast::SoftBreak { span: Span::dummy() }));
+                            .push(Inline::SoftBreak(tomet_ast::SoftBreak {
+                                span: Span::dummy(),
+                            }));
                         paragraph.content.extend(child_p.content);
                     }
                     other => hoisted.push(other),
@@ -289,13 +307,17 @@ mod tests {
         let tree = oneline_simd::parse(doc);
         let ast = to_tomet_ast(&tree).unwrap();
         let dump = format!("{ast:?}");
-        for needle in ["lead prose", "nested item", "kept", "item", "trailing detail"] {
+        for needle in [
+            "lead prose",
+            "nested item",
+            "kept",
+            "item",
+            "trailing detail",
+        ] {
             assert!(dump.contains(needle), "{needle:?} was lost:\n{dump}");
         }
     }
-
 }
-
 
 #[cfg(test)]
 mod differential {
@@ -333,7 +355,10 @@ mod differential {
                 }
                 7 => out.push_str("@solo(a: 1)\n"),
                 // `|` lines that are not the content of an element are plain text to tomet.
-                8 => out.push_str(&format!("= Under {}\n| pipe under a heading\n", rng.below(10))),
+                8 => out.push_str(&format!(
+                    "= Under {}\n| pipe under a heading\n",
+                    rng.below(10)
+                )),
                 9 => out.push_str("- an item\n| pipe under a list item\n"),
                 _ => out.push_str("@card(title: \"c\")\n| inside\n\n| after a blank line\n"),
             }
@@ -349,7 +374,9 @@ mod differential {
             let doc = supported_doc(&mut rng, 1 + (round % 12));
             match compare(&doc) {
                 Outcome::Same => {}
-                Outcome::ReferenceError(e) => panic!("round {round}: tomet rejects the generated document: {e}\n{doc}"),
+                Outcome::ReferenceError(e) => {
+                    panic!("round {round}: tomet rejects the generated document: {e}\n{doc}")
+                }
                 Outcome::Different { real, ours } => {
                     panic!("round {round}: trees differ\n{doc}\ntomet: {real}\nours:  {ours}")
                 }

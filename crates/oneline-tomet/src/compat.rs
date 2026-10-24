@@ -12,7 +12,10 @@ use tomet_ast::Document;
 pub enum Outcome {
     Same,
     /// Both parsed, trees differ. The strings are the `Debug` forms with spans and empty fields removed.
-    Different { real: String, ours: String },
+    Different {
+        real: String,
+        ours: String,
+    },
     /// tomet's own parser rejects the text, so there is nothing to compare against.
     ReferenceError(String),
 }
@@ -25,12 +28,20 @@ pub fn compare(text: &str) -> Outcome {
     let tree = oneline_simd::parse(text);
     let ours = match crate::to_tomet_ast(&tree) {
         Ok(doc) => doc,
-        Err(e) => return Outcome::Different { real: tidy(&format!("{real:?}")), ours: format!("conversion failed: {e}") },
+        Err(e) => {
+            return Outcome::Different {
+                real: tidy(&format!("{real:?}")),
+                ours: format!("conversion failed: {e}"),
+            };
+        }
     };
     if real == ours {
         Outcome::Same
     } else {
-        Outcome::Different { real: tidy(&format!("{real:?}")), ours: tidy(&format!("{ours:?}")) }
+        Outcome::Different {
+            real: tidy(&format!("{real:?}")),
+            ours: tidy(&format!("{ours:?}")),
+        }
     }
 }
 
@@ -48,7 +59,14 @@ pub fn tidy(debug: &str) -> String {
         }
     }
     out.push_str(rest);
-    for empty in ["args: None, ", "value: None, ", "id: None, ", "connects: [], ", "content: None, ", "sublist: None, "] {
+    for empty in [
+        "args: None, ",
+        "value: None, ",
+        "id: None, ",
+        "connects: [], ",
+        "content: None, ",
+        "sublist: None, ",
+    ] {
         out = out.replace(empty, "");
     }
     out
@@ -122,7 +140,10 @@ mod tests {
 
     #[test]
     fn plain_element_with_pipe_children_is_the_same_tree() {
-        assert!(matches!(compare("@card(title: \"x\")\n| inner text\n"), Outcome::Same));
+        assert!(matches!(
+            compare("@card(title: \"x\")\n| inner text\n"),
+            Outcome::Same
+        ));
     }
 
     #[test]
@@ -164,7 +185,8 @@ pub fn outside_subset(chunk: &str) -> Option<&'static str> {
             }
         }
         // An element, heading, list item, connect or pipe line whose brackets do not close on the line.
-        let starts_block = line.starts_with('|') || matches!(t.chars().next(), Some('@' | '=' | '-' | ':'));
+        let starts_block =
+            line.starts_with('|') || matches!(t.chars().next(), Some('@' | '=' | '-' | ':'));
         if starts_block && bracket_delta(line) > 0 {
             return Some("multi-line brackets");
         }
@@ -203,10 +225,16 @@ mod subset_tests {
     fn subset_detector() {
         assert_eq!(outside_subset("= title\ntext\n"), None);
         assert_eq!(outside_subset("@card(title: \"a)\")\n| x\n"), None);
-        assert_eq!(outside_subset("@meta(\n  a: 1\n)\n"), Some("multi-line brackets"));
+        assert_eq!(
+            outside_subset("@meta(\n  a: 1\n)\n"),
+            Some("multi-line brackets")
+        );
         assert_eq!(outside_subset("```\ncode\n```\n"), Some("fence ```"));
         assert_eq!(outside_subset("-| a\n | b\n"), Some("multiline list -|"));
-        assert_eq!(outside_subset("-@x(a)\n"), Some("list marker with group / combine"));
+        assert_eq!(
+            outside_subset("-@x(a)\n"),
+            Some("list marker with group / combine")
+        );
         assert_eq!(outside_subset("- a\n- b\n"), None);
         assert_eq!(outside_subset("-. a\n"), None);
         // Prose with an unbalanced bracket does not open a region.

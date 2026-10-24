@@ -15,7 +15,11 @@ pub const MB: usize = 1 << 20;
 pub const SIZES: [usize; 4] = [64 * KB, MB, 16 * MB, 128 * MB];
 
 pub fn size_label(bytes: usize) -> String {
-    if bytes >= MB { format!("{}MB", bytes / MB) } else { format!("{}KB", bytes / KB) }
+    if bytes >= MB {
+        format!("{}MB", bytes / MB)
+    } else {
+        format!("{}KB", bytes / KB)
+    }
 }
 
 /// Deterministic input (seed 1) so runs are comparable across machines and commits.

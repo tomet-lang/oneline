@@ -74,7 +74,6 @@ fn for_each_newline_scalar<F: FnMut(usize)>(bytes: &[u8], f: &mut F) {
     }
 }
 
-
 /// Extra slots `flatten_newlines` needs past the last position: it writes whole groups
 /// unconditionally and fixes the count afterwards.
 pub const FLATTEN_SLACK: usize = 64;
@@ -90,10 +89,16 @@ pub const FLATTEN_SLACK: usize = 64;
 /// # Panics
 /// If `out.len() < bytes.len() + FLATTEN_SLACK`.
 pub fn flatten_newlines(bytes: &[u8], base: u32, out: &mut [u32]) -> usize {
-    assert!(out.len() >= bytes.len() + FLATTEN_SLACK, "output buffer too small");
+    assert!(
+        out.len() >= bytes.len() + FLATTEN_SLACK,
+        "output buffer too small"
+    );
     #[cfg(target_arch = "x86_64")]
     {
-        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("popcnt") && is_x86_feature_detected!("bmi1") {
+        if is_x86_feature_detected!("avx2")
+            && is_x86_feature_detected!("popcnt")
+            && is_x86_feature_detected!("bmi1")
+        {
             // SAFETY: the CPU features were just detected and `out` was checked to have the slack.
             return unsafe { flatten_newlines_avx2(bytes, base, out) };
         }
@@ -182,7 +187,12 @@ mod tests {
     use super::*;
 
     fn reference(bytes: &[u8]) -> Vec<usize> {
-        bytes.iter().enumerate().filter(|&(_, &b)| b == b'\n').map(|(i, _)| i).collect()
+        bytes
+            .iter()
+            .enumerate()
+            .filter(|&(_, &b)| b == b'\n')
+            .map(|(i, _)| i)
+            .collect()
     }
 
     #[test]
@@ -190,7 +200,9 @@ mod tests {
         let mut seed = 12345u64;
         let mut buf = Vec::new();
         for _ in 0..300 {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             buf.push(if (seed >> 33) % 5 == 0 { b'\n' } else { b'x' });
         }
         for start in 0..40 {
@@ -216,16 +228,39 @@ mod flatten_tests {
             // `density` % of bytes are newlines (100 = all of them).
             let mut buf = Vec::new();
             for _ in 0..700 {
-                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-                buf.push(if (seed >> 33) % 100 < density { b'\n' } else { b'x' });
+                seed = seed
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                buf.push(if (seed >> 33) % 100 < density {
+                    b'\n'
+                } else {
+                    b'x'
+                });
             }
             for start in 0..70 {
-                for end in [start, start + 1, start + 63, start + 64, start + 65, start + 129, buf.len()] {
+                for end in [
+                    start,
+                    start + 1,
+                    start + 63,
+                    start + 64,
+                    start + 65,
+                    start + 129,
+                    buf.len(),
+                ] {
                     let s = &buf[start..end.min(buf.len())];
-                    let want: Vec<u32> = s.iter().enumerate().filter(|&(_, &b)| b == b'\n').map(|(i, _)| 1000 + i as u32).collect();
+                    let want: Vec<u32> = s
+                        .iter()
+                        .enumerate()
+                        .filter(|&(_, &b)| b == b'\n')
+                        .map(|(i, _)| 1000 + i as u32)
+                        .collect();
                     let mut out = vec![0u32; s.len() + FLATTEN_SLACK];
                     let n = flatten_newlines(s, 1000, &mut out);
-                    assert_eq!(&out[..n], &want[..], "density {density} range {start}..{end}");
+                    assert_eq!(
+                        &out[..n],
+                        &want[..],
+                        "density {density} range {start}..{end}"
+                    );
                 }
             }
         }

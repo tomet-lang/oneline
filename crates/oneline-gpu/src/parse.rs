@@ -1,10 +1,12 @@
 use anyhow::Result;
 use oneline_core::{FlatNode, FlatTree};
 
+use crate::ShaderConfig;
 use crate::parser::GpuParser;
 use crate::timing::{StageTimer, mark};
-use crate::util::{bind, check_gpu_len, compute_pass, dispatch_dims, map_all, staging_buffer, take_mapped};
-use crate::ShaderConfig;
+use crate::util::{
+    bind, check_gpu_len, compute_pass, dispatch_dims, map_all, staging_buffer, take_mapped,
+};
 
 /// Nodes in VRAM plus the bind group that exposes them to the kernels.
 pub(crate) struct ParsedNodes {
@@ -25,7 +27,13 @@ impl GpuParser {
         let node_bytes = u64::from(line_count) * std::mem::size_of::<FlatNode>() as u64;
         self.check_fits(node_bytes, "the parsed nodes")?;
 
-        let config = self.uniform("Config Buffer", &ShaderConfig { line_count, text_len });
+        let config = self.uniform(
+            "Config Buffer",
+            &ShaderConfig {
+                line_count,
+                text_len,
+            },
+        );
         let nodes = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Output Nodes GPU Buffer"),
             size: node_bytes.max(4),
@@ -35,7 +43,12 @@ impl GpuParser {
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Oneline Parser Bind Group"),
             layout: &self.parse_layout,
-            entries: &[bind(0, input_buffer), bind(1, line_offsets), bind(2, &config), bind(3, &nodes)],
+            entries: &[
+                bind(0, input_buffer),
+                bind(1, line_offsets),
+                bind(2, &config),
+                bind(3, &nodes),
+            ],
         });
         mark(timer, "parse: create buffers + bind group");
 
@@ -53,7 +66,11 @@ impl GpuParser {
         Ok(ParsedNodes { nodes, bind_group })
     }
 
-    pub(crate) fn download_nodes(&self, nodes: &wgpu::Buffer, line_count: usize) -> Result<Vec<FlatNode>> {
+    pub(crate) fn download_nodes(
+        &self,
+        nodes: &wgpu::Buffer,
+        line_count: usize,
+    ) -> Result<Vec<FlatNode>> {
         let bytes = (line_count * std::mem::size_of::<FlatNode>()) as u64;
         let staging = staging_buffer(&self.device, "Staging Nodes Buffer", bytes);
         let mut encoder = self.device.create_command_encoder(&Default::default());
@@ -75,7 +92,8 @@ impl GpuParser {
 
         let input_buffer = self.upload_text(input, None)?;
         let (line_offsets, line_count) = self.scan_to_buffer(&input_buffer, text_len, None)?;
-        let parsed = self.parse_to_buffer(&input_buffer, &line_offsets, line_count, text_len, None)?;
+        let parsed =
+            self.parse_to_buffer(&input_buffer, &line_offsets, line_count, text_len, None)?;
 
         let nodes = self.download_nodes(&parsed.nodes, line_count as usize)?;
         let offsets = self.download_u32s(&line_offsets, line_count as usize)?;
@@ -93,7 +111,13 @@ impl GpuParser {
 
         let input_buffer = self.upload_text(input, None)?;
         let offsets_buffer = self.upload_u32s("Line Offset Buffer", line_offsets)?;
-        let parsed = self.parse_to_buffer(&input_buffer, &offsets_buffer, line_count as u32, text_len, None)?;
+        let parsed = self.parse_to_buffer(
+            &input_buffer,
+            &offsets_buffer,
+            line_count as u32,
+            text_len,
+            None,
+        )?;
 
         let nodes = self.download_nodes(&parsed.nodes, line_count)?;
         Ok(FlatTree::new(input, nodes, line_offsets.to_vec()))

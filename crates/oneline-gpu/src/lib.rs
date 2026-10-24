@@ -18,15 +18,17 @@ mod query;
 mod scan;
 mod search;
 mod staging;
-mod timing;
-mod tree;
 #[cfg(test)]
 mod tests;
+mod timing;
+mod tree;
 mod util;
 
 pub use document::GpuDocument;
+pub use many::{
+    GpuPatternSet, MAX_PATTERNS, MAX_SET_PATTERN_LEN, MIN_SET_PATTERN_LEN, ManyHit, ManyResult,
+};
 pub use parser::GpuParser;
-pub use many::{GpuPatternSet, MAX_PATTERNS, MAX_SET_PATTERN_LEN, MIN_SET_PATTERN_LEN, ManyHit, ManyResult};
 pub use query::QueryResult;
 pub use search::SearchResult;
 pub use timing::Profile;

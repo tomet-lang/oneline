@@ -22,7 +22,9 @@ use oneline_core::{FlatNode, FlatTree, InputTooLarge, check_input_len};
 pub use line::parse_line;
 pub use links::build_links;
 pub use scan::{FLATTEN_SLACK, count_newlines, flatten_newlines, for_each_newline};
-pub use search::{ManyPatterns, PatternHit, count_all_par, find_all, find_all_par, try_find_all_par};
+pub use search::{
+    ManyPatterns, PatternHit, count_all_par, find_all, find_all_par, try_find_all_par,
+};
 
 /// Inputs smaller than this are not worth splitting across threads.
 const PAR_THRESHOLD: usize = 256 * 1024;
@@ -102,7 +104,11 @@ fn fill_chunk(
     }
 
     // Safety net for the `set_len` in the caller: every slot must be written.
-    assert_eq!(k, nodes.len(), "chunk line count disagrees with the count pass");
+    assert_eq!(
+        k,
+        nodes.len(),
+        "chunk line count disagrees with the count pass"
+    );
 }
 
 /// Splits `bytes` into at most `target` chunks whose boundaries are line starts.
@@ -180,15 +186,26 @@ impl ParseBuffers {
     }
 }
 
-fn build<'a>(input: &'a str, chunks: &[(usize, usize)], parallel: bool, buffers: &mut ParseBuffers) -> FlatTree<'a> {
+fn build<'a>(
+    input: &'a str,
+    chunks: &[(usize, usize)],
+    parallel: bool,
+    buffers: &mut ParseBuffers,
+) -> FlatTree<'a> {
     let bytes = input.as_bytes();
 
     // Pass 1: count lines per chunk.
     let counts: Vec<usize> = if parallel {
         use rayon::prelude::*;
-        chunks.par_iter().map(|&(s, e)| lines_in_chunk(&bytes[s..e])).collect()
+        chunks
+            .par_iter()
+            .map(|&(s, e)| lines_in_chunk(&bytes[s..e]))
+            .collect()
     } else {
-        chunks.iter().map(|&(s, e)| lines_in_chunk(&bytes[s..e])).collect()
+        chunks
+            .iter()
+            .map(|&(s, e)| lines_in_chunk(&bytes[s..e]))
+            .collect()
     };
     let total: usize = counts.iter().sum();
 
@@ -209,7 +226,8 @@ fn build<'a>(input: &'a str, chunks: &[(usize, usize)], parallel: bool, buffers:
     // Pass 2: fill.
     if parallel {
         use rayon::prelude::*;
-        jobs.into_par_iter().for_each(|(s, e, n, o)| fill_chunk(bytes, s, e, n, o));
+        jobs.into_par_iter()
+            .for_each(|(s, e, n, o)| fill_chunk(bytes, s, e, n, o));
     } else {
         for (s, e, n, o) in jobs {
             fill_chunk(bytes, s, e, n, o);
@@ -224,7 +242,6 @@ fn build<'a>(input: &'a str, chunks: &[(usize, usize)], parallel: bool, buffers:
     }
     FlatTree::new(input, nodes, offsets)
 }
-
 
 /// How `parse_par` obtains output space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -307,7 +324,11 @@ fn parse_chunk_into(
 
 /// One pass over the text: every chunk parses into its own buffers, then the buffers are
 /// copied into the final arrays in parallel.
-fn build_gather<'a>(input: &'a str, chunks: &[(usize, usize)], buffers: &mut ParseBuffers) -> FlatTree<'a> {
+fn build_gather<'a>(
+    input: &'a str,
+    chunks: &[(usize, usize)],
+    buffers: &mut ParseBuffers,
+) -> FlatTree<'a> {
     use rayon::prelude::*;
     let bytes = input.as_bytes();
     let hint_per_byte = (output_ratio(bytes) / 20.0).min(1.0);
@@ -319,9 +340,19 @@ fn build_gather<'a>(input: &'a str, chunks: &[(usize, usize)], buffers: &mut Par
         .par_iter_mut()
         .zip(chunks.par_iter())
         .for_each(|((nodes, offsets), &(s, e))| {
-            parse_chunk_into(bytes, s, e, ((e - s) as f64 * hint_per_byte * 1.1) as usize + 16, nodes, offsets);
+            parse_chunk_into(
+                bytes,
+                s,
+                e,
+                ((e - s) as f64 * hint_per_byte * 1.1) as usize + 16,
+                nodes,
+                offsets,
+            );
         });
-    let total: usize = buffers.parts[..chunks.len()].iter().map(|(n, _)| n.len()).sum();
+    let total: usize = buffers.parts[..chunks.len()]
+        .iter()
+        .map(|(n, _)| n.len())
+        .sum();
 
     let (mut nodes, mut offsets) = buffers.take_output(total);
     let parts = &buffers.parts[..chunks.len()];
@@ -335,14 +366,21 @@ fn build_gather<'a>(input: &'a str, chunks: &[(usize, usize)], buffers: &mut Par
         n_rest = n_tail;
         o_rest = o_tail;
     }
-    parts.par_iter().zip(windows.into_par_iter()).for_each(|((n, o), (n_win, o_win))| {
-        // SAFETY: the windows are disjoint, `len` slots each, and `MaybeUninit<T>` has the
-        // layout of `T`; the sources are fully initialized vectors of the same length.
-        unsafe {
-            std::ptr::copy_nonoverlapping(n.as_ptr(), n_win.as_mut_ptr() as *mut FlatNode, n.len());
-            std::ptr::copy_nonoverlapping(o.as_ptr(), o_win.as_mut_ptr() as *mut u32, o.len());
-        }
-    });
+    parts
+        .par_iter()
+        .zip(windows.into_par_iter())
+        .for_each(|((n, o), (n_win, o_win))| {
+            // SAFETY: the windows are disjoint, `len` slots each, and `MaybeUninit<T>` has the
+            // layout of `T`; the sources are fully initialized vectors of the same length.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    n.as_ptr(),
+                    n_win.as_mut_ptr() as *mut FlatNode,
+                    n.len(),
+                );
+                std::ptr::copy_nonoverlapping(o.as_ptr(), o_win.as_mut_ptr() as *mut u32, o.len());
+            }
+        });
     // SAFETY: the windows tile `0..total` and were all written above.
     unsafe {
         nodes.set_len(total);
@@ -362,7 +400,10 @@ pub fn try_parse(input: &str) -> Result<FlatTree<'_>, InputTooLarge> {
 }
 
 /// [`try_parse`] filling the vectors held by `buffers` (see [`ParseBuffers`]).
-pub fn try_parse_reusing<'a>(input: &'a str, buffers: &mut ParseBuffers) -> Result<FlatTree<'a>, InputTooLarge> {
+pub fn try_parse_reusing<'a>(
+    input: &'a str,
+    buffers: &mut ParseBuffers,
+) -> Result<FlatTree<'a>, InputTooLarge> {
     check_input_len(input.len())?;
     if input.is_empty() {
         return Ok(FlatTree::new(input, Vec::new(), Vec::new()));
@@ -385,12 +426,18 @@ pub fn try_parse_par(input: &str) -> Result<FlatTree<'_>, InputTooLarge> {
 }
 
 /// [`try_parse_par`] with an explicit output strategy (for benchmarks and tests).
-pub fn try_parse_par_with(input: &str, strategy: ParStrategy) -> Result<FlatTree<'_>, InputTooLarge> {
+pub fn try_parse_par_with(
+    input: &str,
+    strategy: ParStrategy,
+) -> Result<FlatTree<'_>, InputTooLarge> {
     try_parse_par_with_buffers(input, strategy, &mut ParseBuffers::new())
 }
 
 /// [`try_parse_par`] filling the buffers held by `buffers` (see [`ParseBuffers`]).
-pub fn try_parse_par_reusing<'a>(input: &'a str, buffers: &mut ParseBuffers) -> Result<FlatTree<'a>, InputTooLarge> {
+pub fn try_parse_par_reusing<'a>(
+    input: &'a str,
+    buffers: &mut ParseBuffers,
+) -> Result<FlatTree<'a>, InputTooLarge> {
     try_parse_par_with_buffers(input, ParStrategy::Auto, buffers)
 }
 
@@ -414,7 +461,11 @@ pub fn try_parse_par_with_buffers<'a>(
         ParStrategy::TwoPass => false,
         ParStrategy::Gather => true,
     };
-    Ok(if gather { build_gather(input, &chunks, buffers) } else { build(input, &chunks, true, buffers) })
+    Ok(if gather {
+        build_gather(input, &chunks, buffers)
+    } else {
+        build(input, &chunks, true, buffers)
+    })
 }
 /// Main entry point for the single-threaded CPU parser.
 ///
@@ -463,7 +514,11 @@ mod tests {
 
     fn assert_matches_reference(input: &str) {
         let (offs, nodes) = reference(input);
-        assert_eq!(scan_line_offsets(input.as_bytes()), offs, "scan_line_offsets");
+        assert_eq!(
+            scan_line_offsets(input.as_bytes()),
+            offs,
+            "scan_line_offsets"
+        );
         for (name, tree) in [("parse", parse(input)), ("parse_par", parse_par(input))] {
             assert_eq!(tree.line_offsets, offs, "{name}: offsets");
             assert_eq!(tree.nodes, nodes, "{name}: nodes");
@@ -540,7 +595,11 @@ mod tests {
             assert_matches_reference(case);
         }
         // Lines longer than any chunk/SIMD width, and one giant unterminated line.
-        assert_matches_reference(&format!("{}\n|{}", "a".repeat(100_000), "b".repeat(300_000)));
+        assert_matches_reference(&format!(
+            "{}\n|{}",
+            "a".repeat(100_000),
+            "b".repeat(300_000)
+        ));
         assert_matches_reference(&"|".repeat(1_000_000));
     }
 
@@ -587,7 +646,12 @@ mod tests {
         // One ParseBuffers across inputs that grow, shrink, vanish and change shape: stale
         // contents or a stale length from an earlier parse must never show through.
         let mut inputs: Vec<String> = Vec::new();
-        for (p, size) in [(Profile::Mixed, 3 << 20), (Profile::ShortLines, 600 << 10), (Profile::LongLines, 5 << 20), (Profile::Nested, 300 << 10)] {
+        for (p, size) in [
+            (Profile::Mixed, 3 << 20),
+            (Profile::ShortLines, 600 << 10),
+            (Profile::LongLines, 5 << 20),
+            (Profile::Nested, 300 << 10),
+        ] {
             inputs.push(datagen::generate(p, size, 17));
         }
         inputs.push(String::new());
@@ -627,10 +691,19 @@ mod tests {
         let tree = try_parse_par_with_buffers(&text, ParStrategy::Gather, &mut buffers).unwrap();
         let (nodes_ptr, offsets_ptr) = (tree.nodes.as_ptr(), tree.line_offsets.as_ptr());
         buffers.recycle(tree);
-        let parts_ptrs: Vec<*const FlatNode> = buffers.parts.iter().map(|(n, _)| n.as_ptr()).collect();
+        let parts_ptrs: Vec<*const FlatNode> =
+            buffers.parts.iter().map(|(n, _)| n.as_ptr()).collect();
         let again = try_parse_par_with_buffers(&text, ParStrategy::Gather, &mut buffers).unwrap();
-        assert_eq!(again.nodes.as_ptr(), nodes_ptr, "result nodes were reallocated");
-        assert_eq!(again.line_offsets.as_ptr(), offsets_ptr, "result offsets were reallocated");
+        assert_eq!(
+            again.nodes.as_ptr(),
+            nodes_ptr,
+            "result nodes were reallocated"
+        );
+        assert_eq!(
+            again.line_offsets.as_ptr(),
+            offsets_ptr,
+            "result offsets were reallocated"
+        );
         let after: Vec<*const FlatNode> = buffers.parts.iter().map(|(n, _)| n.as_ptr()).collect();
         assert_eq!(after, parts_ptrs, "per-chunk buffers were reallocated");
     }
@@ -639,9 +712,18 @@ mod tests {
     fn auto_prefers_gather_only_for_large_inputs_with_long_lines() {
         let long = datagen::generate(Profile::LongLines, 40 << 20, 1);
         let short = datagen::generate(Profile::ShortLines, 40 << 20, 1);
-        assert!(prefers_gather(long.as_bytes()), "long lines: output is a tiny fraction of the text");
-        assert!(!prefers_gather(short.as_bytes()), "short lines: output is as large as the text");
-        assert!(!prefers_gather(datagen::generate(Profile::LongLines, 1 << 20, 1).as_bytes()), "too small");
+        assert!(
+            prefers_gather(long.as_bytes()),
+            "long lines: output is a tiny fraction of the text"
+        );
+        assert!(
+            !prefers_gather(short.as_bytes()),
+            "short lines: output is as large as the text"
+        );
+        assert!(
+            !prefers_gather(datagen::generate(Profile::LongLines, 1 << 20, 1).as_bytes()),
+            "too small"
+        );
     }
 
     #[test]
@@ -665,7 +747,10 @@ mod tests {
         text.push_str("\ntail");
         let actual_lines = text.bytes().filter(|&b| b == b'\n').count() + 1;
         let estimated = (output_ratio(text.as_bytes()) / 20.0 * text.len() as f64) as usize;
-        assert!(estimated * 10 < actual_lines, "the sample must under-estimate for this test to mean anything: {estimated} vs {actual_lines}");
+        assert!(
+            estimated * 10 < actual_lines,
+            "the sample must under-estimate for this test to mean anything: {estimated} vs {actual_lines}"
+        );
         let (offs, nodes) = reference(&text);
         let tree = parse(&text);
         assert_eq!(tree.line_offsets, offs, "growth: offsets");
@@ -692,7 +777,9 @@ mod tests {
         assert_eq!(check_input_len(MAX_INPUT_LEN), Ok(()));
         assert_eq!(
             check_input_len(MAX_INPUT_LEN + 1),
-            Err(InputTooLarge { len: MAX_INPUT_LEN + 1 })
+            Err(InputTooLarge {
+                len: MAX_INPUT_LEN + 1
+            })
         );
     }
 }

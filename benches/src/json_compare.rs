@@ -32,20 +32,32 @@ struct Args {
 }
 
 fn parse_args() -> Args {
-    let mut args = Args { mb: 256, profile: Profile::Mixed, iterations: 9, json_file: None };
+    let mut args = Args {
+        mb: 256,
+        profile: Profile::Mixed,
+        iterations: 9,
+        json_file: None,
+    };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         let mut value = |name: &str| it.next().unwrap_or_else(|| panic!("{name} needs a value"));
         match a.as_str() {
             "--mb" => args.mb = value("--mb").parse().expect("--mb: number"),
-            "--iterations" => args.iterations = value("--iterations").parse().expect("--iterations: number"),
+            "--iterations" => {
+                args.iterations = value("--iterations").parse().expect("--iterations: number")
+            }
             "--json" => args.json_file = Some(value("--json")),
             "--profile" => {
                 let want = value("--profile");
                 args.profile = Profile::ALL
                     .into_iter()
                     .find(|p| p.name() == want)
-                    .unwrap_or_else(|| panic!("unknown profile {want}; one of {:?}", Profile::ALL.map(Profile::name)));
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "unknown profile {want}; one of {:?}",
+                            Profile::ALL.map(Profile::name)
+                        )
+                    });
             }
             other => panic!("unknown argument {other}"),
         }
@@ -148,11 +160,16 @@ struct Row {
 }
 
 fn print_rows(rows: &[Row], json_bytes: usize, lines: usize, oneline_bytes: Option<usize>) {
-    println!("{:<46} {:>9} {:>11} {:>11} {:>12}", "", "ms", "GB/s input", "GB/s json", "M lines/s");
+    println!(
+        "{:<46} {:>9} {:>11} {:>11} {:>12}",
+        "", "ms", "GB/s input", "GB/s json", "M lines/s"
+    );
     for r in rows {
         let secs = r.ms / 1e3;
         let own = if r.label.starts_with("oneline") || r.label.starts_with("utf8") {
-            oneline_bytes.map_or(String::from("-"), |b| format!("{:.1}", b as f64 / secs / 1e9))
+            oneline_bytes.map_or(String::from("-"), |b| {
+                format!("{:.1}", b as f64 / secs / 1e9)
+            })
         } else {
             format!("{:.1}", json_bytes as f64 / secs / 1e9)
         };
@@ -173,18 +190,30 @@ fn run_json_parsers(json: &[u8], iterations: usize, expected_objects: Option<usi
     // simdjson (C++), DOM, parsing the padded input in place.
     let buf = padded(json);
     let mut parser = dom_ffi::parser_new(SIMDJSON_MAXSIZE_BYTES);
-    let ms = median_ms(iterations, || {}, || {
-        // SAFETY: `buf` has SIMDJSON_PADDING initialized bytes after the `json.len()` bytes passed.
-        let code = unsafe { dom_ffi::parser_parse(parser.pin_mut(), &buf[..json.len()], false) };
-        assert_eq!(code, 0, "simdjson rejected the document");
-        0
-    });
+    let ms = median_ms(
+        iterations,
+        || {},
+        || {
+            // SAFETY: `buf` has SIMDJSON_PADDING initialized bytes after the `json.len()` bytes passed.
+            let code =
+                unsafe { dom_ffi::parser_parse(parser.pin_mut(), &buf[..json.len()], false) };
+            assert_eq!(code, 0, "simdjson rejected the document");
+            0
+        },
+    );
     // SAFETY: the last parse succeeded and nothing touched the parser since.
-    let objects = count_objects(unsafe { dom_ffi::parser_get_tape_view(parser.as_ref().unwrap()) }.tape);
+    let objects =
+        count_objects(unsafe { dom_ffi::parser_get_tape_view(parser.as_ref().unwrap()) }.tape);
     if let Some(want) = expected_objects {
-        assert_eq!(objects, want, "simdjson tape holds a different number of objects than the document has lines");
+        assert_eq!(
+            objects, want,
+            "simdjson tape holds a different number of objects than the document has lines"
+        );
     }
-    rows.push(Row { label: "simdjson 4.6 (C++), DOM, in place".into(), ms });
+    rows.push(Row {
+        label: "simdjson 4.6 (C++), DOM, in place".into(),
+        ms,
+    });
 
     // simd-json (Rust port) rewrites its input, so every run gets a fresh copy outside the clock.
     let scratch = std::cell::RefCell::new(vec![0u8; json.len()]);
@@ -192,9 +221,17 @@ fn run_json_parsers(json: &[u8], iterations: usize, expected_objects: Option<usi
     let ms = median_ms(
         iterations,
         || scratch.borrow_mut().copy_from_slice(json),
-        || simd_json::to_tape_with_buffers(&mut scratch.borrow_mut(), &mut buffers).expect("simd-json rejected the document").0.len(),
+        || {
+            simd_json::to_tape_with_buffers(&mut scratch.borrow_mut(), &mut buffers)
+                .expect("simd-json rejected the document")
+                .0
+                .len()
+        },
     );
-    rows.push(Row { label: "simd-json 0.18 (Rust), tape".into(), ms });
+    rows.push(Row {
+        label: "simd-json 0.18 (Rust), tape".into(),
+        ms,
+    });
     rows
 }
 
@@ -204,7 +241,10 @@ fn main() {
 
     if let Some(path) = &args.json_file {
         let json = std::fs::read(path).unwrap_or_else(|e| panic!("{path}: {e}"));
-        println!("==> {path}: {:.2} MB of JSON (oneline cannot parse it; JSON parsers only)\n", json.len() as f64 / 1e6);
+        println!(
+            "==> {path}: {:.2} MB of JSON (oneline cannot parse it; JSON parsers only)\n",
+            json.len() as f64 / 1e6
+        );
         let rows = run_json_parsers(&json, args.iterations, None);
         print_rows(&rows, json.len(), 1, None);
         return;
@@ -224,26 +264,67 @@ fn main() {
 
     let mut rows = run_json_parsers(&json, args.iterations, Some(lines));
 
-    let single = median_ms(args.iterations, || {}, || oneline_simd::parse(&text).nodes.len());
-    let par = median_ms(args.iterations, || {}, || oneline_simd::parse_par(&text).nodes.len());
-    rows.push(Row { label: "oneline, single core".into(), ms: single });
-    rows.push(Row { label: format!("oneline, {} threads", rayon::current_num_threads()), ms: par });
+    let single = median_ms(
+        args.iterations,
+        || {},
+        || oneline_simd::parse(&text).nodes.len(),
+    );
+    let par = median_ms(
+        args.iterations,
+        || {},
+        || oneline_simd::parse_par(&text).nodes.len(),
+    );
+    rows.push(Row {
+        label: "oneline, single core".into(),
+        ms: single,
+    });
+    rows.push(Row {
+        label: format!("oneline, {} threads", rayon::current_num_threads()),
+        ms: par,
+    });
     let mut buffers = oneline_simd::ParseBuffers::new();
     rows.push(Row {
-        label: format!("oneline, {} threads, reusing buffers", rayon::current_num_threads()),
-        ms: median_ms(args.iterations, || {}, || {
-            let tree = oneline_simd::try_parse_par_reusing(&text, &mut buffers).unwrap();
-            let n = tree.nodes.len();
-            buffers.recycle(tree);
-            n
-        }),
+        label: format!(
+            "oneline, {} threads, reusing buffers",
+            rayon::current_num_threads()
+        ),
+        ms: median_ms(
+            args.iterations,
+            || {},
+            || {
+                let tree = oneline_simd::try_parse_par_reusing(&text, &mut buffers).unwrap();
+                let n = tree.nodes.len();
+                buffers.recycle(tree);
+                n
+            },
+        ),
     });
-    let utf8_ms = median_ms(args.iterations, || {}, || simdutf8::basic::from_utf8(black_box(text.as_bytes())).map_or(0, str::len));
-    rows.push(Row { label: "utf8 validation of the text (simdutf8), alone".into(), ms: utf8_ms });
-    let std_utf8_ms = median_ms(args.iterations, || {}, || std::str::from_utf8(black_box(text.as_bytes())).map_or(0, str::len));
-    rows.push(Row { label: "utf8 validation of the text (std), alone".into(), ms: std_utf8_ms });
-    rows.push(Row { label: "oneline single core + utf8 validation".into(), ms: single + utf8_ms });
-    rows.push(Row { label: "oneline threads + utf8 validation (1 thread)".into(), ms: par + utf8_ms });
+    let utf8_ms = median_ms(
+        args.iterations,
+        || {},
+        || simdutf8::basic::from_utf8(black_box(text.as_bytes())).map_or(0, str::len),
+    );
+    rows.push(Row {
+        label: "utf8 validation of the text (simdutf8), alone".into(),
+        ms: utf8_ms,
+    });
+    let std_utf8_ms = median_ms(
+        args.iterations,
+        || {},
+        || std::str::from_utf8(black_box(text.as_bytes())).map_or(0, str::len),
+    );
+    rows.push(Row {
+        label: "utf8 validation of the text (std), alone".into(),
+        ms: std_utf8_ms,
+    });
+    rows.push(Row {
+        label: "oneline single core + utf8 validation".into(),
+        ms: single + utf8_ms,
+    });
+    rows.push(Row {
+        label: "oneline threads + utf8 validation (1 thread)".into(),
+        ms: par + utf8_ms,
+    });
 
     print_rows(&rows, json.len(), lines, Some(text.len()));
     println!(

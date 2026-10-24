@@ -74,7 +74,10 @@ impl TreeLinks {
             subtree_end[top as usize] = n as u32;
         }
 
-        Self { parent, subtree_end }
+        Self {
+            parent,
+            subtree_end,
+        }
     }
 }
 

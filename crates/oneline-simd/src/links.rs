@@ -73,7 +73,9 @@ fn nearest_previous(keys: &[u32], or_equal: bool) -> Vec<u32> {
             // rest; otherwise runs of equal depths would make this summary O(block).
             let mut summary: Vec<u32> = Vec::with_capacity(stack.len().min(64));
             for (i, &s) in stack.iter().enumerate() {
-                let next_same = stack.get(i + 1).is_some_and(|&t| keys[t as usize] == keys[s as usize]);
+                let next_same = stack
+                    .get(i + 1)
+                    .is_some_and(|&t| keys[t as usize] == keys[s as usize]);
                 if !next_same {
                     summary.push(s);
                 }
@@ -96,7 +98,11 @@ fn nearest_previous(keys: &[u32], or_equal: bool) -> Vec<u32> {
                 head = pool[head as usize].link;
             }
             for &s in stack {
-                pool.push(Entry { key: keys[s as usize], idx: s, link: head });
+                pool.push(Entry {
+                    key: keys[s as usize],
+                    idx: s,
+                    link: head,
+                });
                 head = (pool.len() - 1) as u32;
             }
         }
@@ -113,7 +119,11 @@ fn nearest_previous(keys: &[u32], or_equal: bool) -> Vec<u32> {
             while p != NONE && !ok(pool[p as usize].key, x, or_equal) {
                 p = pool[p as usize].link;
             }
-            *slot = if p == NONE { NONE } else { pool[p as usize].idx };
+            *slot = if p == NONE {
+                NONE
+            } else {
+                pool[p as usize].idx
+            };
         }
     });
 
@@ -163,7 +173,10 @@ pub fn build_links(nodes: &[FlatNode]) -> TreeLinks {
             }
         });
 
-    TreeLinks { parent, subtree_end }
+    TreeLinks {
+        parent,
+        subtree_end,
+    }
 }
 
 #[cfg(test)]
@@ -174,7 +187,16 @@ mod tests {
     fn nodes_from(spec: &[(u32, bool)]) -> Vec<FlatNode> {
         spec.iter()
             .map(|&(d, blank)| {
-                FlatNode::new(d, if blank { NodeKind::Blank } else { NodeKind::Text }, 0, 1)
+                FlatNode::new(
+                    d,
+                    if blank {
+                        NodeKind::Blank
+                    } else {
+                        NodeKind::Text
+                    },
+                    0,
+                    1,
+                )
             })
             .collect()
     }
@@ -188,9 +210,24 @@ mod tests {
         check(&[]);
         check(&nodes_from(&[(0, false)]));
         check(&nodes_from(&[(0, true), (3, true)]));
-        check(&nodes_from(&[(1, false), (2, false), (3, false), (2, false), (0, true), (1, false), (0, false)]));
+        check(&nodes_from(&[
+            (1, false),
+            (2, false),
+            (3, false),
+            (2, false),
+            (0, true),
+            (1, false),
+            (0, false),
+        ]));
         // Depth jumps (1 -> 3 -> 2) and equal depths.
-        check(&nodes_from(&[(1, false), (3, false), (2, false), (2, false), (1, false), (1, false)]));
+        check(&nodes_from(&[
+            (1, false),
+            (3, false),
+            (2, false),
+            (2, false),
+            (1, false),
+            (1, false),
+        ]));
     }
 
     /// Pathological shapes for the persistent-stack combine phase, across block borders.
@@ -202,9 +239,17 @@ mod tests {
             ("flat zero", vec![0; n]),
             ("strictly increasing", (0..n as u32).collect()),
             ("strictly decreasing", (0..n as u32).rev().collect()),
-            ("header then flat", std::iter::once(0).chain(std::iter::repeat_n(1, n - 1)).collect()),
+            (
+                "header then flat",
+                std::iter::once(0)
+                    .chain(std::iter::repeat_n(1, n - 1))
+                    .collect(),
+            ),
             ("sawtooth", (0..n as u32).map(|i| i % 7).collect()),
-            ("sawtooth long", (0..n as u32).map(|i| (i / 3) % 40000 % 11).collect()),
+            (
+                "sawtooth long",
+                (0..n as u32).map(|i| (i / 3) % 40000 % 11).collect(),
+            ),
             ("alternating", (0..n as u32).map(|i| i % 2).collect()),
         ];
         for (name, depths) in shapes {
@@ -227,12 +272,24 @@ mod tests {
             let nodes: Vec<FlatNode> = (0..n)
                 .map(|_| {
                     let blank = rng.chance(10);
-                    FlatNode::new(rng.below(max_depth) as u32, if blank { NodeKind::Blank } else { NodeKind::Text }, 0, 1)
+                    FlatNode::new(
+                        rng.below(max_depth) as u32,
+                        if blank {
+                            NodeKind::Blank
+                        } else {
+                            NodeKind::Text
+                        },
+                        0,
+                        1,
+                    )
                 })
                 .collect();
             let got = build_links(&nodes);
             let want = TreeLinks::from_nodes_sequential(&nodes);
-            assert!(got == want, "round {round} (n={n}, max_depth={max_depth}) differs");
+            assert!(
+                got == want,
+                "round {round} (n={n}, max_depth={max_depth}) differs"
+            );
         }
     }
 

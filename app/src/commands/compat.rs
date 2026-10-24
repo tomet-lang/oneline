@@ -19,7 +19,12 @@ fn collect(path: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
         for e in entries {
             let p = e.path();
             // Build output and dependency trees hold copies of the same documents.
-            if p.is_dir() && matches!(p.file_name().and_then(|n| n.to_str()), Some("target" | "node_modules" | "dist" | ".git")) {
+            if p.is_dir()
+                && matches!(
+                    p.file_name().and_then(|n| n.to_str()),
+                    Some("target" | "node_modules" | "dist" | ".git")
+                )
+            {
                 continue;
             }
             collect(&p, out)?;
@@ -68,7 +73,8 @@ pub fn run_compat(paths: &[PathBuf], show: usize, texts: &[String]) -> Result<()
     let mut tomet_rejects = 0usize;
 
     for file in &files {
-        let text = std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+        let text =
+            std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
         for chunk in compat::chunks(&text) {
             let n = chunk.lines().count();
             chunks_total += 1;
@@ -95,7 +101,9 @@ pub fn run_compat(paths: &[PathBuf], show: usize, texts: &[String]) -> Result<()
                 }
                 Outcome::Different { real, ours } => {
                     if tally.examples.len() < show {
-                        tally.examples.push((file.clone(), chunk.to_string(), real, ours));
+                        tally
+                            .examples
+                            .push((file.clone(), chunk.to_string(), real, ours));
                     }
                 }
             }
@@ -103,7 +111,10 @@ pub fn run_compat(paths: &[PathBuf], show: usize, texts: &[String]) -> Result<()
     }
 
     let pct = |a: usize, b: usize| 100.0 * a as f64 / b.max(1) as f64;
-    println!("files: {}   chunks (runs of non-blank lines): {chunks_total}   lines: {lines_total}\n", files.len());
+    println!(
+        "files: {}   chunks (runs of non-blank lines): {chunks_total}   lines: {lines_total}\n",
+        files.len()
+    );
     println!("outside the subset (not counted below):");
     let mut ex: Vec<_> = excluded.iter().collect();
     ex.sort_by_key(|(_, v)| std::cmp::Reverse(v.1));
@@ -121,11 +132,21 @@ pub fn run_compat(paths: &[PathBuf], show: usize, texts: &[String]) -> Result<()
         pct(same_lines, in_lines)
     );
 
-    println!("{:<24} {:>7} {:>9} {:>7} {:>10}", "inside, first line", "chunks", "identical", "%", "tomet-err");
+    println!(
+        "{:<24} {:>7} {:>9} {:>7} {:>10}",
+        "inside, first line", "chunks", "identical", "%", "tomet-err"
+    );
     let mut rows: Vec<_> = by_shape.iter().collect();
     rows.sort_by_key(|(_, t)| std::cmp::Reverse(t.total));
     for (shape, t) in &rows {
-        println!("{:<24} {:>7} {:>9} {:>6.1}% {:>10}", shape, t.total, t.same, pct(t.same, t.total), t.reference_error);
+        println!(
+            "{:<24} {:>7} {:>9} {:>6.1}% {:>10}",
+            shape,
+            t.total,
+            t.same,
+            pct(t.same, t.total),
+            t.reference_error
+        );
     }
 
     if show > 0 {

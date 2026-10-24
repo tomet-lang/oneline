@@ -27,12 +27,20 @@ fn median(mut v: Vec<Duration>) -> Duration {
 
 fn print_profile(title: &str, profiles: &[oneline_gpu::Profile]) {
     let wall = median(profiles.iter().map(|p| p.wall).collect());
-    println!("\n{title}   (median of {} runs, host wall {wall:.2?})", profiles.len());
+    println!(
+        "\n{title}   (median of {} runs, host wall {wall:.2?})",
+        profiles.len()
+    );
 
-    println!("  host steps (time since the previous step; GPU work overlaps and surfaces in the step that waits)");
+    println!(
+        "  host steps (time since the previous step; GPU work overlaps and surfaces in the step that waits)"
+    );
     let host: Vec<_> = profiles.iter().map(|p| p.host_steps.clone()).collect();
     for (label, d) in median_steps(&host) {
-        println!("    {label:<52} {d:>10.2?}  {:>5.1}%", 100.0 * d.as_secs_f64() / wall.as_secs_f64());
+        println!(
+            "    {label:<52} {d:>10.2?}  {:>5.1}%",
+            100.0 * d.as_secs_f64() / wall.as_secs_f64()
+        );
     }
 
     if profiles.iter().any(|p| !p.gpu_passes.is_empty()) {
@@ -43,15 +51,24 @@ fn print_profile(title: &str, profiles: &[oneline_gpu::Profile]) {
             println!("    {label:<52} {d:>10.2?}");
         }
         let total: Duration = steps.iter().map(|&(_, d)| d).sum();
-        println!("    {:<52} {total:>10.2?}  ({:.1}% of host wall)", "total GPU execution", 100.0 * total.as_secs_f64() / wall.as_secs_f64());
+        println!(
+            "    {:<52} {total:>10.2?}  ({:.1}% of host wall)",
+            "total GPU execution",
+            100.0 * total.as_secs_f64() / wall.as_secs_f64()
+        );
     } else {
         println!("  GPU passes: not available (adapter lacks TIMESTAMP_QUERY)");
     }
 }
 
-
 /// GPU tree construction and subtree queries on the resident document, next to the CPU.
-fn profile_tree(parser: &GpuParser, doc: &oneline_gpu::GpuDocument, content: &str, kind: Option<NodeKind>, iterations: usize) -> Result<()> {
+fn profile_tree(
+    parser: &GpuParser,
+    doc: &oneline_gpu::GpuDocument,
+    content: &str,
+    kind: Option<NodeKind>,
+    iterations: usize,
+) -> Result<()> {
     if let Err(e) = parser.build_tree(doc) {
         println!("\nTREE: not available for this document: {e}");
         return Ok(());
@@ -60,7 +77,10 @@ fn profile_tree(parser: &GpuParser, doc: &oneline_gpu::GpuDocument, content: &st
     for _ in 0..iterations {
         profiles.push(parser.profile_build_tree(doc)?);
     }
-    print_profile("BUILD TREE on resident document (new tree; working buffers reused after the first call)", &profiles);
+    print_profile(
+        "BUILD TREE on resident document (new tree; working buffers reused after the first call)",
+        &profiles,
+    );
 
     // Rebuilding into the previous tree's own buffers: nothing is allocated or cleared.
     let mut previous = Some(parser.build_tree(doc)?);
@@ -70,11 +90,16 @@ fn profile_tree(parser: &GpuParser, doc: &oneline_gpu::GpuDocument, content: &st
         previous = Some(tree);
         rebuilds.push(profile);
     }
-    print_profile("REBUILD TREE reusing the previous tree's buffers", &rebuilds);
+    print_profile(
+        "REBUILD TREE reusing the previous tree's buffers",
+        &rebuilds,
+    );
 
     // The same relations on the CPU, nodes already parsed (parallel ANSV).
     let cpu_tree = oneline_simd::try_parse_par(content)?;
-    let cpu = time_median(iterations, || Ok(oneline_simd::build_links(&cpu_tree.nodes)))?;
+    let cpu = time_median(iterations, || {
+        Ok(oneline_simd::build_links(&cpu_tree.nodes))
+    })?;
     println!("  CPU build_links (parallel, nodes already parsed)       {cpu:>10.2?}");
 
     // Subtree queries: pick roots whose subtrees span several orders of magnitude.
@@ -106,15 +131,28 @@ fn profile_tree(parser: &GpuParser, doc: &oneline_gpu::GpuDocument, content: &st
     }
     roots.sort_by_key(|&(_, s)| s);
     println!("\n  subtree query (kind filter), GPU resident vs CPU range filter");
-    println!("    {:>13} {:>10} {:>12} {:>12}", "subtree lines", "GPU", "CPU (1 thr)", "CPU (12 thr)");
+    println!(
+        "    {:>13} {:>10} {:>12} {:>12}",
+        "subtree lines", "GPU", "CPU (1 thr)", "CPU (12 thr)"
+    );
     for (root, lines) in roots {
-        let g = time_median(iterations, || Ok(parser.query_subtree(doc, &tree, root, kind, None, 1024)?.total_matches))?;
+        let g = time_median(iterations, || {
+            Ok(parser
+                .query_subtree(doc, &tree, root, kind, None, 1024)?
+                .total_matches)
+        })?;
         let c = time_median(iterations, || {
-            Ok(links.subtree(root).filter(|&i| kind.is_none_or(|k| cpu_tree.nodes[i].kind() == k)).count())
+            Ok(links
+                .subtree(root)
+                .filter(|&i| kind.is_none_or(|k| cpu_tree.nodes[i].kind() == k))
+                .count())
         })?;
         let cp = time_median(iterations, || {
             use rayon::prelude::*;
-            Ok((root..root + lines).into_par_iter().filter(|&i| kind.is_none_or(|k| cpu_tree.nodes[i].kind() == k)).count())
+            Ok((root..root + lines)
+                .into_par_iter()
+                .filter(|&i| kind.is_none_or(|k| cpu_tree.nodes[i].kind() == k))
+                .count())
         })?;
         println!("    {lines:>13} {g:>10.2?} {c:>12.2?} {cp:>12.2?}");
     }
@@ -131,7 +169,8 @@ pub fn run_profile(
     pattern: Option<&str>,
 ) -> Result<()> {
     let content = match file {
-        Some(p) => std::fs::read_to_string(p).with_context(|| format!("Failed to read file: {}", p.display()))?,
+        Some(p) => std::fs::read_to_string(p)
+            .with_context(|| format!("Failed to read file: {}", p.display()))?,
         None => datagen::generate(profile, synthetic_kb << 10, 1),
     };
     let parser = GpuParser::new().context("Failed to initialize GPU parser")?;
@@ -140,8 +179,16 @@ pub fn run_profile(
         content.len(),
         profile.name(),
         parser.adapter_name(),
-        if parser.timestamps_supported() { "yes" } else { "no" },
-        if parser.is_software() { "  [SOFTWARE ADAPTER: numbers are not representative]" } else { "" },
+        if parser.timestamps_supported() {
+            "yes"
+        } else {
+            "no"
+        },
+        if parser.is_software() {
+            "  [SOFTWARE ADAPTER: numbers are not representative]"
+        } else {
+            ""
+        },
     );
 
     // Warm-up so pipeline/driver first-use costs do not pollute the medians.
@@ -158,8 +205,14 @@ pub fn run_profile(
             resident.push(parser.profile_search_document(&doc, p, max_matches)?);
             one_shot.push(parser.profile_search_raw(&content, p, max_matches)?);
         }
-        print_profile(&format!("SEARCH {pattern:?} on resident document"), &resident);
-        print_profile(&format!("SEARCH {pattern:?} one-shot: upload + search"), &one_shot);
+        print_profile(
+            &format!("SEARCH {pattern:?} on resident document"),
+            &resident,
+        );
+        print_profile(
+            &format!("SEARCH {pattern:?} one-shot: upload + search"),
+            &one_shot,
+        );
         return Ok(());
     }
 

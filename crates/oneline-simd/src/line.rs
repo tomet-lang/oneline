@@ -35,7 +35,12 @@ pub fn parse_line(line: &[u8], line_start: u32) -> FlatNode {
     if content.is_empty() {
         return FlatNode::new(depth as u32, NodeKind::Blank, span_start, 0);
     }
-    FlatNode::new(depth as u32, classify_line(content), span_start, content.len() as u32)
+    FlatNode::new(
+        depth as u32,
+        classify_line(content),
+        span_start,
+        content.len() as u32,
+    )
 }
 
 /// What a line's first byte says about it. `0` = plain text.
@@ -87,7 +92,8 @@ mod tests {
             return FlatNode::new(0, NodeKind::Blank, line_start, 0);
         }
         let mut eff_len = len;
-        while eff_len > 0 && (line_bytes[eff_len - 1] == b'\r' || line_bytes[eff_len - 1] == b'\n') {
+        while eff_len > 0 && (line_bytes[eff_len - 1] == b'\r' || line_bytes[eff_len - 1] == b'\n')
+        {
             eff_len -= 1;
         }
         if eff_len == 0 {
@@ -110,7 +116,9 @@ mod tests {
             }
         }
         let mut content_start = prefix_end;
-        while content_start < eff_len && (line_bytes[content_start] == b' ' || line_bytes[content_start] == b'\t') {
+        while content_start < eff_len
+            && (line_bytes[content_start] == b' ' || line_bytes[content_start] == b'\t')
+        {
             content_start += 1;
         }
         let span_start = line_start + content_start as u32;
@@ -124,7 +132,9 @@ mod tests {
             b':' => NodeKind::Connect,
             b'@' => NodeKind::Element,
             b'-' if rest.len() > 1 && (rest[1] == b' ' || rest[1] == b'\t') => NodeKind::List,
-            b'-' if rest.len() > 2 && rest[1] == b'.' && (rest[2] == b' ' || rest[2] == b'\t') => NodeKind::OrderedList,
+            b'-' if rest.len() > 2 && rest[1] == b'.' && (rest[2] == b' ' || rest[2] == b'\t') => {
+                NodeKind::OrderedList
+            }
             b'/' if rest.len() > 1 && rest[1] == b'/' => NodeKind::Comment,
             _ => NodeKind::Text,
         };
@@ -139,9 +149,15 @@ mod tests {
         let mut rng = Rng::new(4242);
         for round in 0..300_000 {
             let len = rng.below(14) as usize;
-            let line: Vec<u8> = (0..len).map(|_| alphabet[rng.below(alphabet.len() as u64) as usize]).collect();
+            let line: Vec<u8> = (0..len)
+                .map(|_| alphabet[rng.below(alphabet.len() as u64) as usize])
+                .collect();
             let start = rng.below(1000) as u32;
-            assert_eq!(parse_line(&line, start), reference(&line, start), "round {round}: {line:?}");
+            assert_eq!(
+                parse_line(&line, start),
+                reference(&line, start),
+                "round {round}: {line:?}"
+            );
         }
     }
 

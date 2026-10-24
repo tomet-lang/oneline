@@ -27,7 +27,14 @@ pub enum Profile {
 }
 
 impl Profile {
-    pub const ALL: [Profile; 6] = [Self::Repeat, Self::ShortLines, Self::Mixed, Self::LongLines, Self::Prose, Self::Nested];
+    pub const ALL: [Profile; 6] = [
+        Self::Repeat,
+        Self::ShortLines,
+        Self::Mixed,
+        Self::LongLines,
+        Self::Prose,
+        Self::Nested,
+    ];
 
     pub const fn name(self) -> &'static str {
         match self {
@@ -75,8 +82,29 @@ impl Rng {
 }
 
 const WORDS: &[&str] = &[
-    "lorem", "ipsum", "dolor", "sit", "amet", "parse", "line", "node", "depth", "tomet", "SIMD",
-    "GPU", "縦棒", "階層", "構文", "解析", "naïve", "café", "データ", "|pipe|", "a", "of", "the",
+    "lorem",
+    "ipsum",
+    "dolor",
+    "sit",
+    "amet",
+    "parse",
+    "line",
+    "node",
+    "depth",
+    "tomet",
+    "SIMD",
+    "GPU",
+    "縦棒",
+    "階層",
+    "構文",
+    "解析",
+    "naïve",
+    "café",
+    "データ",
+    "|pipe|",
+    "a",
+    "of",
+    "the",
 ];
 
 /// The `Prose` vocabulary: 4096 pseudo-words of 2..=10 lowercase letters, fixed so
@@ -86,7 +114,9 @@ pub fn prose_vocabulary() -> Vec<String> {
     (0..4096)
         .map(|_| {
             let len = rng.range(2, 11);
-            (0..len).map(|_| (b'a' + rng.below(26) as u8) as char).collect()
+            (0..len)
+                .map(|_| (b'a' + rng.below(26) as u8) as char)
+                .collect()
         })
         .collect()
 }
@@ -159,7 +189,9 @@ pub fn generate(profile: Profile, target_bytes: usize, seed: u64) -> String {
                 out.push_str(&format!("=[ Section {section} ]"));
                 eol(&mut out, &mut rng, 0);
                 // Log-uniform section length, 10 .. 1,000,000 lines.
-                until_heading = 10f64.powf(1.0 + 5.0 * (rng.below(1 << 20) as f64 / (1u64 << 20) as f64)) as u64;
+                until_heading = 10f64
+                    .powf(1.0 + 5.0 * (rng.below(1 << 20) as f64 / (1u64 << 20) as f64))
+                    as u64;
                 continue;
             }
             until_heading -= 1;

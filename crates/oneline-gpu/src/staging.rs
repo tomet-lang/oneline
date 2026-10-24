@@ -43,7 +43,10 @@ impl StagingRing {
                 })
             })
             .collect();
-        Self { buffers, in_flight: vec![None; RING] }
+        Self {
+            buffers,
+            in_flight: vec![None; RING],
+        }
     }
 }
 
@@ -90,7 +93,8 @@ impl GpuParser {
 
             if let Some(submission) = ring.in_flight[slot].take() {
                 // The DMA that read this buffer must finish before the CPU writes it again.
-                self.device.poll(wgpu::Maintain::WaitForSubmissionIndex(submission));
+                self.device
+                    .poll(wgpu::Maintain::WaitForSubmissionIndex(submission));
                 self.remap_for_write(buffer)?;
             }
 

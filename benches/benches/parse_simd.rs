@@ -38,9 +38,11 @@ fn parse_by_profile(c: &mut Criterion) {
     for profile in Profile::ALL {
         let text = dataset(profile, size);
         g.throughput(Throughput::Bytes(text.len() as u64));
-        g.bench_with_input(BenchmarkId::new("single_core", profile.name()), &text, |b, t| {
-            b.iter_with_large_drop(|| oneline_simd::parse(t))
-        });
+        g.bench_with_input(
+            BenchmarkId::new("single_core", profile.name()),
+            &text,
+            |b, t| b.iter_with_large_drop(|| oneline_simd::parse(t)),
+        );
         g.bench_with_input(BenchmarkId::new("rayon", profile.name()), &text, |b, t| {
             b.iter_with_large_drop(|| oneline_simd::parse_par(t))
         });
@@ -57,12 +59,16 @@ fn tree_links(c: &mut Criterion) {
         let text = dataset(profile, size);
         let tree = oneline_simd::parse_par(&text);
         g.throughput(Throughput::Bytes(text.len() as u64));
-        g.bench_with_input(BenchmarkId::new("parallel_ansv", profile.name()), &tree.nodes, |b, n| {
-            b.iter_with_large_drop(|| oneline_simd::build_links(n))
-        });
-        g.bench_with_input(BenchmarkId::new("sequential_stack", profile.name()), &tree.nodes, |b, n| {
-            b.iter_with_large_drop(|| TreeLinks::from_nodes_sequential(n))
-        });
+        g.bench_with_input(
+            BenchmarkId::new("parallel_ansv", profile.name()),
+            &tree.nodes,
+            |b, n| b.iter_with_large_drop(|| oneline_simd::build_links(n)),
+        );
+        g.bench_with_input(
+            BenchmarkId::new("sequential_stack", profile.name()),
+            &tree.nodes,
+            |b, n| b.iter_with_large_drop(|| TreeLinks::from_nodes_sequential(n)),
+        );
     }
     g.finish();
 }

@@ -39,9 +39,13 @@ impl GpuParser {
         timer: Option<&StageTimer>,
     ) -> Result<SearchResult> {
         if pattern.is_empty() || pattern.len() > MAX_PATTERN_LEN {
-            return Err(anyhow!("pattern must be 1..={MAX_PATTERN_LEN} bytes, got {}", pattern.len()));
+            return Err(anyhow!(
+                "pattern must be 1..={MAX_PATTERN_LEN} bytes, got {}",
+                pattern.len()
+            ));
         }
-        let max_u32 = u32::try_from(max_matches).map_err(|_| anyhow!("max_matches {max_matches} does not fit in u32"))?;
+        let max_u32 = u32::try_from(max_matches)
+            .map_err(|_| anyhow!("max_matches {max_matches} does not fit in u32"))?;
 
         let mut packed = [0u8; MAX_PATTERN_LEN];
         packed[..pattern.len()].copy_from_slice(pattern);
@@ -56,7 +60,8 @@ impl GpuParser {
         // One workgroup per 256 * WORDS_PER_THREAD words.
         let dims = dispatch_dims(text_len.div_ceil(4).div_ceil(WORDS_PER_THREAD * 256));
         self.with_scratch(max_u32, timer, |s| {
-            self.queue.write_buffer(&s.search_config, 0, bytemuck::bytes_of(&cfg));
+            self.queue
+                .write_buffer(&s.search_config, 0, bytemuck::bytes_of(&cfg));
             let (total_matches, offsets) = self.read_counted(
                 s,
                 &self.search_pipeline,
@@ -67,7 +72,10 @@ impl GpuParser {
                 "search",
                 timer,
             )?;
-            Ok(SearchResult { total_matches, offsets })
+            Ok(SearchResult {
+                total_matches,
+                offsets,
+            })
         })
     }
 
@@ -80,13 +88,28 @@ impl GpuParser {
         max_matches: usize,
     ) -> Result<SearchResult> {
         match doc.text_group() {
-            None => Ok(SearchResult { total_matches: 0, offsets: Vec::new() }),
-            Some(group) => self.run_search(group, doc.byte_freq(), doc.text_len() as u32, pattern, max_matches, None),
+            None => Ok(SearchResult {
+                total_matches: 0,
+                offsets: Vec::new(),
+            }),
+            Some(group) => self.run_search(
+                group,
+                doc.byte_freq(),
+                doc.text_len() as u32,
+                pattern,
+                max_matches,
+                None,
+            ),
         }
     }
 
     /// One-shot search: uploads the text, then searches it. No line scan is needed.
-    pub fn search_raw(&self, input: &str, pattern: &[u8], max_matches: usize) -> Result<SearchResult> {
+    pub fn search_raw(
+        &self,
+        input: &str,
+        pattern: &[u8],
+        max_matches: usize,
+    ) -> Result<SearchResult> {
         self.search_raw_inner(input, pattern, max_matches, None)
     }
 
@@ -99,11 +122,21 @@ impl GpuParser {
     ) -> Result<SearchResult> {
         check_gpu_len(input.len())?;
         if input.is_empty() {
-            return Ok(SearchResult { total_matches: 0, offsets: Vec::new() });
+            return Ok(SearchResult {
+                total_matches: 0,
+                offsets: Vec::new(),
+            });
         }
         let text = self.upload_text(input, timer)?;
         let group = self.text_bind_group(&text);
-        self.run_search(&group, &sample_byte_histogram(input.as_bytes()), input.len() as u32, pattern, max_matches, timer)
+        self.run_search(
+            &group,
+            &sample_byte_histogram(input.as_bytes()),
+            input.len() as u32,
+            pattern,
+            max_matches,
+            timer,
+        )
     }
 
     /// `search_document`, with a breakdown of where the time went.
@@ -115,13 +148,25 @@ impl GpuParser {
     ) -> Result<Profile> {
         let timer = StageTimer::new(self);
         if let Some(group) = doc.text_group() {
-            self.run_search(group, doc.byte_freq(), doc.text_len() as u32, pattern, max_matches, Some(&timer))?;
+            self.run_search(
+                group,
+                doc.byte_freq(),
+                doc.text_len() as u32,
+                pattern,
+                max_matches,
+                Some(&timer),
+            )?;
         }
         timer.finish(self)
     }
 
     /// `search_raw`, with a breakdown of where the time went.
-    pub fn profile_search_raw(&self, input: &str, pattern: &[u8], max_matches: usize) -> Result<Profile> {
+    pub fn profile_search_raw(
+        &self,
+        input: &str,
+        pattern: &[u8],
+        max_matches: usize,
+    ) -> Result<Profile> {
         let timer = StageTimer::new(self);
         self.search_raw_inner(input, pattern, max_matches, Some(&timer))?;
         timer.finish(self)
@@ -165,7 +210,10 @@ pub(crate) fn choose_window(pattern: &[u8], freq: &[u32; 256]) -> u32 {
     let n = pattern.len().min(4);
     // Sum of log-frequencies = log of the product: how likely a random position matches.
     let score = |j: usize| -> f64 {
-        pattern[j..j + n].iter().map(|&b| f64::from(freq[b as usize] + 1).ln()).sum()
+        pattern[j..j + n]
+            .iter()
+            .map(|&b| f64::from(freq[b as usize] + 1).ln())
+            .sum()
     };
     (0..=pattern.len() - n)
         .min_by(|&a, &b| score(a).total_cmp(&score(b)))
@@ -199,7 +247,10 @@ mod tests {
         let n = text.len();
         text[n - 10] = b'z';
         let freq = sample_byte_histogram(&text);
-        assert_eq!(freq.iter().map(|&c| c as usize).sum::<usize>(), SAMPLE_BYTES);
+        assert_eq!(
+            freq.iter().map(|&c| c as usize).sum::<usize>(),
+            SAMPLE_BYTES
+        );
         assert!(freq[b'a' as usize] as usize >= SAMPLE_BYTES - 1);
     }
 }

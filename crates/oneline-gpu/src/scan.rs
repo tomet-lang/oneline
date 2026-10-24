@@ -1,11 +1,11 @@
 use anyhow::Result;
 
+use crate::ScanConfig;
 use crate::parser::GpuParser;
 use crate::timing::{StageTimer, mark};
 use crate::util::{
     bind, check_gpu_len, compute_pass, dispatch_dims, map_all, staging_buffer, take_mapped,
 };
-use crate::ScanConfig;
 
 /// Bytes of text handled by one scan workgroup (256 threads x 16 words x 4 bytes).
 const BLOCK_BYTES: u32 = 16384;
@@ -26,7 +26,12 @@ impl GpuParser {
 
         let scan_cfg_buf = self.uniform(
             "Scan Config Buffer",
-            &ScanConfig { num_blocks, text_len, _pad1: 0, _pad2: 0 },
+            &ScanConfig {
+                num_blocks,
+                text_len,
+                _pad1: 0,
+                _pad2: 0,
+            },
         );
         let storage = |label: &str, size: u64, usage: wgpu::BufferUsages| {
             self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -36,8 +41,16 @@ impl GpuParser {
                 mapped_at_creation: false,
             })
         };
-        let block_counts = storage("Block Counts Buffer", u64::from(num_blocks) * 4, wgpu::BufferUsages::STORAGE);
-        let block_offsets = storage("Block Offsets Buffer", u64::from(num_blocks) * 4, wgpu::BufferUsages::STORAGE);
+        let block_counts = storage(
+            "Block Counts Buffer",
+            u64::from(num_blocks) * 4,
+            wgpu::BufferUsages::STORAGE,
+        );
+        let block_offsets = storage(
+            "Block Offsets Buffer",
+            u64::from(num_blocks) * 4,
+            wgpu::BufferUsages::STORAGE,
+        );
         let scan_meta = storage(
             "Scan Meta Buffer",
             16,
@@ -117,7 +130,8 @@ impl GpuParser {
             return Ok(Vec::new());
         }
         let input_buffer = self.upload_text(input, None)?;
-        let (line_offsets, total_lines) = self.scan_to_buffer(&input_buffer, input.len() as u32, None)?;
+        let (line_offsets, total_lines) =
+            self.scan_to_buffer(&input_buffer, input.len() as u32, None)?;
         self.download_u32s(&line_offsets, total_lines as usize)
     }
 

@@ -157,9 +157,15 @@ impl GpuParser {
     /// 4-byte window; the set can be searched against any document.
     pub fn compile_patterns(&self, doc: &GpuDocument, patterns: &[&[u8]]) -> Result<GpuPatternSet> {
         if patterns.is_empty() || patterns.len() > MAX_PATTERNS {
-            return Err(anyhow!("a set needs 1..={MAX_PATTERNS} patterns, got {}", patterns.len()));
+            return Err(anyhow!(
+                "a set needs 1..={MAX_PATTERNS} patterns, got {}",
+                patterns.len()
+            ));
         }
-        if let Some(bad) = patterns.iter().position(|p| !(MIN_SET_PATTERN_LEN..=MAX_SET_PATTERN_LEN).contains(&p.len())) {
+        if let Some(bad) = patterns
+            .iter()
+            .position(|p| !(MIN_SET_PATTERN_LEN..=MAX_SET_PATTERN_LEN).contains(&p.len()))
+        {
             return Err(anyhow!(
                 "pattern {bad} is {} bytes; patterns must be {MIN_SET_PATTERN_LEN}..={MAX_SET_PATTERN_LEN} bytes",
                 patterns[bad].len()
@@ -176,7 +182,9 @@ impl GpuParser {
         let limit = self.limits.max_compute_workgroup_storage_size;
         let fused_bytes = filter_words * 4 + hist_slots * 4 + 16;
         if fused_bytes > limit {
-            return Err(anyhow!("this set needs {fused_bytes} bytes of workgroup shared memory; the adapter offers {limit}"));
+            return Err(anyhow!(
+                "this set needs {fused_bytes} bytes of workgroup shared memory; the adapter offers {limit}"
+            ));
         }
         let compact_ok = filter_words * 4 + COMPACT_TILE_BYTES <= limit;
         let pipelines = self.many_pipelines(bits, hist_slots, words_per_thread, compact_ok);
@@ -190,7 +198,12 @@ impl GpuParser {
             let window = choose_window(p, freq) as usize;
             let head = u32::from_le_bytes(p[window..window + 4].try_into().unwrap());
             let h = hash_window(head, shift);
-            let slot = [head, p.len() as u32 | (window as u32) << 8 | (pid as u32) << 16, words.len() as u32, NONE];
+            let slot = [
+                head,
+                p.len() as u32 | (window as u32) << 8 | (pid as u32) << 16,
+                words.len() as u32,
+                NONE,
+            ];
             for chunk in p.chunks(4) {
                 let mut w = [0u8; 4];
                 w[..chunk.len()].copy_from_slice(chunk);
@@ -210,7 +223,11 @@ impl GpuParser {
                 let mut at_table = true;
                 let mut index = 0usize;
                 loop {
-                    let next = if at_table { table[h as usize][3] } else { overflow[index][3] };
+                    let next = if at_table {
+                        table[h as usize][3]
+                    } else {
+                        overflow[index][3]
+                    };
                     if next == NONE {
                         if at_table {
                             table[h as usize][3] = new_index;
@@ -229,11 +246,12 @@ impl GpuParser {
         }
 
         let storage = |label: &str, bytes: &[u8]| {
-            self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(label),
-                contents: bytes,
-                usage: wgpu::BufferUsages::STORAGE,
-            })
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some(label),
+                    contents: bytes,
+                    usage: wgpu::BufferUsages::STORAGE,
+                })
         };
         let bitmap_buf = storage("Pattern Filter Bitmap", bytemuck::cast_slice(&bitmap));
         let table_buf = storage("Pattern Hash Table", bytemuck::cast_slice(&table));
@@ -242,12 +260,24 @@ impl GpuParser {
         let set_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Pattern Set Bind Group"),
             layout: &self.many_set_layout,
-            entries: &[bind(0, &bitmap_buf), bind(1, &table_buf), bind(2, &overflow_buf), bind(3, &words_buf)],
+            entries: &[
+                bind(0, &bitmap_buf),
+                bind(1, &table_buf),
+                bind(2, &overflow_buf),
+                bind(3, &words_buf),
+            ],
         });
 
-        let rw = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST;
+        let rw = wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_SRC
+            | wgpu::BufferUsages::COPY_DST;
         let small = |label: &str, size: u64, usage: wgpu::BufferUsages| {
-            self.device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage, mapped_at_creation: false })
+            self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size,
+                usage,
+                mapped_at_creation: false,
+            })
         };
         let n = patterns.len() as u64;
         Ok(GpuPatternSet {
@@ -259,21 +289,39 @@ impl GpuParser {
             hit_count: small("Pattern Hit Count Buffer", 4, rw),
             cand_count: small("Pattern Candidate Count Buffer", 4, rw),
             status: small("Pattern Status Buffer", 4, rw),
-            verify_args: small("Pattern Verify Args Buffer", 12, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT),
+            verify_args: small(
+                "Pattern Verify Args Buffer",
+                12,
+                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT,
+            ),
             compact: Mutex::new(None),
             staging: staging_buffer(&self.device, "Pattern Result Staging Buffer", 12 + n * 4),
             hits: Mutex::new(None),
         })
     }
 
-    fn many_pipelines(&self, bits: u32, hist_slots: u32, fused_wpt: u32, compact_ok: bool) -> ManyPipelines {
-        let mut cache = self.many.pipelines.lock().unwrap_or_else(|e| e.into_inner());
+    fn many_pipelines(
+        &self,
+        bits: u32,
+        hist_slots: u32,
+        fused_wpt: u32,
+        compact_ok: bool,
+    ) -> ManyPipelines {
+        let mut cache = self
+            .many
+            .pipelines
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some(found) = cache.get(&(bits, hist_slots)) {
             if found.collect.is_some() || !compact_ok {
                 return found.clone();
             }
         }
-        let build = |module: &wgpu::ShaderModule, layout: &wgpu::PipelineLayout, entry: &str, wpt: u32, hashes: u32| {
+        let build = |module: &wgpu::ShaderModule,
+                     layout: &wgpu::PipelineLayout,
+                     entry: &str,
+                     wpt: u32,
+                     hashes: u32| {
             let constants = HashMap::from([
                 ("WORDS_PER_THREAD".to_string(), f64::from(wpt)),
                 ("FILTER_WORDS".to_string(), f64::from(1u32 << (bits - 5))),
@@ -281,22 +329,56 @@ impl GpuParser {
                 ("HIST_SLOTS".to_string(), f64::from(hist_slots)),
                 ("BLOOM_HASHES".to_string(), f64::from(hashes)),
             ]);
-            self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some(entry),
-                layout: Some(layout),
-                module,
-                entry_point: Some(entry),
-                compilation_options: wgpu::PipelineCompilationOptions { constants: &constants, ..Default::default() },
-                cache: None,
-            })
+            self.device
+                .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some(entry),
+                    layout: Some(layout),
+                    module,
+                    entry_point: Some(entry),
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        constants: &constants,
+                        ..Default::default()
+                    },
+                    cache: None,
+                })
         };
         let m = &self.many;
         let pipelines = ManyPipelines {
-            fused: build(&m.shader_fused, &m.layout_fused, "search_many", fused_wpt, 1),
+            fused: build(
+                &m.shader_fused,
+                &m.layout_fused,
+                "search_many",
+                fused_wpt,
+                1,
+            ),
             // The compact strategy pays per candidate, so it uses the two-hash filter.
-            collect: compact_ok.then(|| build(&m.shader_compact, &m.layout_compact, "collect_candidates", COMPACT_WORDS_PER_THREAD, 2)),
-            make_args: compact_ok.then(|| build(&m.shader_compact, &m.layout_compact, "make_verify_args", 1, 2)),
-            verify: compact_ok.then(|| build(&m.shader_compact, &m.layout_compact, "verify_candidates", 1, 2)),
+            collect: compact_ok.then(|| {
+                build(
+                    &m.shader_compact,
+                    &m.layout_compact,
+                    "collect_candidates",
+                    COMPACT_WORDS_PER_THREAD,
+                    2,
+                )
+            }),
+            make_args: compact_ok.then(|| {
+                build(
+                    &m.shader_compact,
+                    &m.layout_compact,
+                    "make_verify_args",
+                    1,
+                    2,
+                )
+            }),
+            verify: compact_ok.then(|| {
+                build(
+                    &m.shader_compact,
+                    &m.layout_compact,
+                    "verify_candidates",
+                    1,
+                    2,
+                )
+            }),
         };
         cache.insert((bits, hist_slots), pipelines.clone());
         pipelines
@@ -306,12 +388,22 @@ impl GpuParser {
     ///
     /// `max_hits == 0` only counts (fastest); otherwise up to `max_hits` occurrences are also
     /// returned.
-    pub fn search_many(&self, doc: &GpuDocument, set: &GpuPatternSet, max_hits: usize) -> Result<ManyResult> {
+    pub fn search_many(
+        &self,
+        doc: &GpuDocument,
+        set: &GpuPatternSet,
+        max_hits: usize,
+    ) -> Result<ManyResult> {
         self.search_many_inner(doc, set, max_hits, None)
     }
 
     /// `search_many`, with a breakdown of where the time went.
-    pub fn profile_search_many(&self, doc: &GpuDocument, set: &GpuPatternSet, max_hits: usize) -> Result<Profile> {
+    pub fn profile_search_many(
+        &self,
+        doc: &GpuDocument,
+        set: &GpuPatternSet,
+        max_hits: usize,
+    ) -> Result<Profile> {
         let timer = StageTimer::new(self);
         self.search_many_inner(doc, set, max_hits, Some(&timer))?;
         timer.finish(self)
@@ -324,15 +416,23 @@ impl GpuParser {
         max_hits: usize,
         timer: Option<&StageTimer>,
     ) -> Result<ManyResult> {
-        let max_u32 = u32::try_from(max_hits).map_err(|_| anyhow!("max_hits {max_hits} does not fit in u32"))?;
+        let max_u32 = u32::try_from(max_hits)
+            .map_err(|_| anyhow!("max_hits {max_hits} does not fit in u32"))?;
         let Some(text_group) = doc.text_group() else {
-            return Ok(ManyResult { counts: vec![0; set.len()], total_hits: 0, hits: Vec::new() });
+            return Ok(ManyResult {
+                counts: vec![0; set.len()],
+                total_hits: 0,
+                hits: Vec::new(),
+            });
         };
         self.check_fits(u64::from(max_u32) * 8, "the hit records")?;
 
         // The hit buffer, grown on demand.
         let mut hits_slot = set.hits.lock().unwrap_or_else(|e| e.into_inner());
-        if hits_slot.as_ref().is_none_or(|(cap, _)| *cap < max_hits.max(1)) {
+        if hits_slot
+            .as_ref()
+            .is_none_or(|(cap, _)| *cap < max_hits.max(1))
+        {
             let cap = max_hits.max(1).next_power_of_two();
             let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Pattern Hits Buffer"),
@@ -349,7 +449,9 @@ impl GpuParser {
         let mut capacity = candidate_capacity(text_len);
         #[cfg(test)]
         {
-            let cap = self.candidate_capacity_cap.load(std::sync::atomic::Ordering::Relaxed);
+            let cap = self
+                .candidate_capacity_cap
+                .load(std::sync::atomic::Ordering::Relaxed);
             if cap != 0 {
                 capacity = cap;
             }
@@ -368,7 +470,12 @@ impl GpuParser {
         let group1 = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Many Bind Group 1"),
             layout: &self.many_run_layout,
-            entries: &[bind(0, &cfg), bind(1, &set.counts), bind(2, &set.hit_count), bind(3, hits_buffer)],
+            entries: &[
+                bind(0, &cfg),
+                bind(1, &set.counts),
+                bind(2, &set.hit_count),
+                bind(3, hits_buffer),
+            ],
         });
         mark(timer, "many: create config + bind group");
 
@@ -384,21 +491,40 @@ impl GpuParser {
                 let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("Many Bind Group 3"),
                     layout: &self.many_compact_layout,
-                    entries: &[bind(0, &candidates), bind(1, &set.cand_count), bind(2, &set.status), bind(3, &set.verify_args)],
+                    entries: &[
+                        bind(0, &candidates),
+                        bind(1, &set.cand_count),
+                        bind(2, &set.status),
+                        bind(3, &set.verify_args),
+                    ],
                 });
-                *state = Some(CompactState { capacity, _candidates: candidates, group });
+                *state = Some(CompactState {
+                    capacity,
+                    _candidates: candidates,
+                    group,
+                });
             }
             let group3 = &state.as_ref().expect("just ensured").group;
             self.reset_set_buffers(set);
             mark(timer, "many: reset counters");
 
-            let blocks = (text_len as u32).div_ceil(4).div_ceil(256 * COMPACT_WORDS_PER_THREAD);
+            let blocks = (text_len as u32)
+                .div_ceil(4)
+                .div_ceil(256 * COMPACT_WORDS_PER_THREAD);
             let (wg_x, wg_y) = dispatch_dims(blocks);
             let p = &set.pipelines;
             let mut encoder = self.device.create_command_encoder(&Default::default());
             for (label, pipeline, dims) in [
-                ("many: collect candidates", p.collect.as_ref().expect("compact"), (wg_x, wg_y)),
-                ("many: verify args", p.make_args.as_ref().expect("compact"), (1, 1)),
+                (
+                    "many: collect candidates",
+                    p.collect.as_ref().expect("compact"),
+                    (wg_x, wg_y),
+                ),
+                (
+                    "many: verify args",
+                    p.make_args.as_ref().expect("compact"),
+                    (1, 1),
+                ),
             ] {
                 let mut pass = compute_pass(&mut encoder, label, timer);
                 pass.set_pipeline(pipeline);
@@ -431,7 +557,9 @@ impl GpuParser {
         }
 
         self.reset_set_buffers(set);
-        let blocks = (text_len as u32).div_ceil(4).div_ceil(256 * set.words_per_thread);
+        let blocks = (text_len as u32)
+            .div_ceil(4)
+            .div_ceil(256 * set.words_per_thread);
         let (wg_x, wg_y) = dispatch_dims(blocks);
         let mut encoder = self.device.create_command_encoder(&Default::default());
         {
@@ -451,7 +579,8 @@ impl GpuParser {
     }
 
     fn reset_set_buffers(&self, set: &GpuPatternSet) {
-        self.queue.write_buffer(&set.counts, 0, &vec![0u8; set.count as usize * 4]);
+        self.queue
+            .write_buffer(&set.counts, 0, &vec![0u8; set.count as usize * 4]);
         for buffer in [&set.hit_count, &set.cand_count, &set.status] {
             self.queue.write_buffer(buffer, 0, &0u32.to_ne_bytes());
         }
@@ -470,7 +599,11 @@ impl GpuParser {
         let out = {
             let view = set.staging.slice(..).get_mapped_range();
             let words = bytemuck::cast_slice::<u8, u32>(&view);
-            (words[0], words[1], words[3..3 + set.count as usize].to_vec())
+            (
+                words[0],
+                words[1],
+                words[3..3 + set.count as usize].to_vec(),
+            )
         };
         set.staging.unmap();
         Ok(out)
@@ -498,10 +631,17 @@ impl GpuParser {
             encoder.copy_buffer_to_buffer(hits_buffer, 0, &staging, 0, bytes);
             self.queue.submit(Some(encoder.finish()));
             map_all(&self.device, &[&staging])?;
-            hits = take_mapped::<[u32; 2]>(&staging, valid).into_iter().map(|[pattern, offset]| ManyHit { pattern, offset }).collect();
+            hits = take_mapped::<[u32; 2]>(&staging, valid)
+                .into_iter()
+                .map(|[pattern, offset]| ManyHit { pattern, offset })
+                .collect();
             hits.sort_unstable();
             mark(timer, "many: read back and sort the hits");
         }
-        Ok(ManyResult { counts, total_hits, hits })
+        Ok(ManyResult {
+            counts,
+            total_hits,
+            hits,
+        })
     }
 }

@@ -3,9 +3,7 @@ use oneline_core::NodeKind;
 
 use crate::parser::GpuParser;
 use crate::timing::{Profile, StageTimer, mark};
-use crate::util::{
-    bind, check_gpu_len, compute_pass, dispatch_dims, map_all, staging_buffer,
-};
+use crate::util::{bind, check_gpu_len, compute_pass, dispatch_dims, map_all, staging_buffer};
 use crate::{QueryConfig, ShaderConfig};
 
 /// Result of a GPU query.
@@ -53,7 +51,10 @@ impl GpuParser {
             })
         };
         let config = uniform("Query Config Buffer", std::mem::size_of::<QueryConfig>());
-        let search_config = uniform("Search Config Buffer", std::mem::size_of::<crate::SearchConfig>());
+        let search_config = uniform(
+            "Search Config Buffer",
+            std::mem::size_of::<crate::SearchConfig>(),
+        );
         let match_count = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Match Count Buffer"),
             size: 4,
@@ -78,7 +79,16 @@ impl GpuParser {
         let group1 = group("Query Bind Group", &config);
         let search_group1 = group("Search Bind Group", &search_config);
         let staging = staging_buffer(&self.device, "Staging Query Result Buffer", 4 + bytes);
-        Ok(QueryScratch { capacity, config, search_config, match_count, matched, group1, search_group1, staging })
+        Ok(QueryScratch {
+            capacity,
+            config,
+            search_config,
+            match_count,
+            matched,
+            group1,
+            search_group1,
+            staging,
+        })
     }
 
     /// Runs `f` with scratch buffers able to hold `max_matches` indices. The
@@ -121,7 +131,8 @@ impl GpuParser {
         max_matches: usize,
         timer: Option<&StageTimer>,
     ) -> Result<QueryResult> {
-        let max_u32 = u32::try_from(max_matches).map_err(|_| anyhow!("max_matches {max_matches} does not fit in u32"))?;
+        let max_u32 = u32::try_from(max_matches)
+            .map_err(|_| anyhow!("max_matches {max_matches} does not fit in u32"))?;
         self.with_scratch(max_u32, timer, |s| {
             let q_config = QueryConfig {
                 target_kind: kind.map(|k| k as u32).unwrap_or(0),
@@ -131,11 +142,16 @@ impl GpuParser {
                 range_end: range.1,
                 _pad: [0; 3],
             };
-            self.queue.write_buffer(&s.config, 0, bytemuck::bytes_of(&q_config));
+            self.queue
+                .write_buffer(&s.config, 0, bytemuck::bytes_of(&q_config));
             let dims = dispatch_dims(range.1.saturating_sub(range.0).div_ceil(64));
-            let (total_matches, indices) =
-                self.read_counted(s, pipeline, group0, &s.group1, dims, max_u32, "filter", timer)?;
-            Ok(QueryResult { total_matches, indices })
+            let (total_matches, indices) = self.read_counted(
+                s, pipeline, group0, &s.group1, dims, max_u32, "filter", timer,
+            )?;
+            Ok(QueryResult {
+                total_matches,
+                indices,
+            })
         })
     }
 
@@ -153,7 +169,8 @@ impl GpuParser {
         pass_label: &'static str,
         timer: Option<&StageTimer>,
     ) -> Result<(u32, Vec<u32>)> {
-        self.queue.write_buffer(&s.match_count, 0, &0u32.to_ne_bytes());
+        self.queue
+            .write_buffer(&s.match_count, 0, &0u32.to_ne_bytes());
         mark(timer, "query: write config + reset counter");
 
         // Read the first few indices in the same round trip as the count. Whether
@@ -179,7 +196,8 @@ impl GpuParser {
         map_all(&self.device, &[&s.staging])?;
         mark(timer, "query: wait for GPU + map readback");
 
-        let total_matches = bytemuck::cast_slice::<u8, u32>(&s.staging.slice(..).get_mapped_range())[0];
+        let total_matches =
+            bytemuck::cast_slice::<u8, u32>(&s.staging.slice(..).get_mapped_range())[0];
         let valid = (total_matches as usize).min(max_matches as usize);
 
         if valid > first as usize {
@@ -188,7 +206,13 @@ impl GpuParser {
             let rest_from = first_bytes;
             let rest_to = valid as u64 * 4;
             let mut encoder = self.device.create_command_encoder(&Default::default());
-            encoder.copy_buffer_to_buffer(&s.matched, rest_from, &s.staging, 4 + rest_from, rest_to - rest_from);
+            encoder.copy_buffer_to_buffer(
+                &s.matched,
+                rest_from,
+                &s.staging,
+                4 + rest_from,
+                rest_to - rest_from,
+            );
             self.queue.submit(Some(encoder.finish()));
             map_all(&self.device, &[&s.staging])?;
             mark(timer, "query: second readback for the remaining matches");
@@ -212,7 +236,9 @@ impl GpuParser {
         depth: Option<u32>,
         max_matches: usize,
     ) -> Result<Vec<u32>> {
-        Ok(self.query_raw_inner(input, kind, depth, max_matches, None)?.indices)
+        Ok(self
+            .query_raw_inner(input, kind, depth, max_matches, None)?
+            .indices)
     }
 
     fn query_raw_inner(
@@ -225,12 +251,24 @@ impl GpuParser {
     ) -> Result<QueryResult> {
         check_gpu_len(input.len())?;
         if input.is_empty() {
-            return Ok(QueryResult { total_matches: 0, indices: Vec::new() });
+            return Ok(QueryResult {
+                total_matches: 0,
+                indices: Vec::new(),
+            });
         }
         let text_len = input.len() as u32;
         let input_buffer = self.upload_text(input, timer)?;
         let (line_offsets, line_count) = self.scan_to_buffer(&input_buffer, text_len, timer)?;
-        self.query_fused(&input_buffer, &line_offsets, line_count, text_len, kind, depth, max_matches, timer)
+        self.query_fused(
+            &input_buffer,
+            &line_offsets,
+            line_count,
+            text_len,
+            kind,
+            depth,
+            max_matches,
+            timer,
+        )
     }
 
     /// `query_raw`, with a breakdown of where the time went.
@@ -287,13 +325,31 @@ impl GpuParser {
         max_matches: usize,
         timer: Option<&StageTimer>,
     ) -> Result<QueryResult> {
-        let config = self.uniform("Config Buffer", &ShaderConfig { line_count, text_len });
+        let config = self.uniform(
+            "Config Buffer",
+            &ShaderConfig {
+                line_count,
+                text_len,
+            },
+        );
         let group0 = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Fused Query Bind Group"),
             layout: &self.fused_layout,
-            entries: &[bind(0, input_buffer), bind(1, line_offsets), bind(2, &config)],
+            entries: &[
+                bind(0, input_buffer),
+                bind(1, line_offsets),
+                bind(2, &config),
+            ],
         });
-        self.run_query(&self.fused_pipeline, &group0, (0, line_count), kind, depth, max_matches, timer)
+        self.run_query(
+            &self.fused_pipeline,
+            &group0,
+            (0, line_count),
+            kind,
+            depth,
+            max_matches,
+            timer,
+        )
     }
 }
 

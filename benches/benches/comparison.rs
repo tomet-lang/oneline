@@ -36,13 +36,17 @@ fn cold_and_warm(c: &mut Criterion) {
         let mut cold = c.benchmark_group("compare/cold");
         configure(&mut cold, size);
         cold.throughput(Throughput::Bytes(text.len() as u64));
-        cold.bench_with_input(BenchmarkId::new("cpu_parse_par+filter", &id), &text, |b, t| {
-            b.iter(|| cpu_filter(&oneline_simd::parse_par(t).nodes, kind))
-        });
+        cold.bench_with_input(
+            BenchmarkId::new("cpu_parse_par+filter", &id),
+            &text,
+            |b, t| b.iter(|| cpu_filter(&oneline_simd::parse_par(t).nodes, kind)),
+        );
         if let Some(p) = &gpu {
-            cold.bench_with_input(BenchmarkId::new("gpu_one_shot_fused", &id), &text, |b, t| {
-                b.iter(|| p.query_raw(t, Some(kind), None, 1 << 20).unwrap())
-            });
+            cold.bench_with_input(
+                BenchmarkId::new("gpu_one_shot_fused", &id),
+                &text,
+                |b, t| b.iter(|| p.query_raw(t, Some(kind), None, 1 << 20).unwrap()),
+            );
         }
         cold.finish();
 
@@ -63,7 +67,6 @@ fn cold_and_warm(c: &mut Criterion) {
     }
 }
 
-
 /// Substring search on `prose`, with patterns of very different selectivity taken from
 /// the generator's vocabulary. Same question both ways: every occurrence offset, or just
 /// the count.
@@ -74,7 +77,10 @@ fn search(c: &mut Criterion) {
     let gpu = gpu();
     let vocab = datagen::prose_vocabulary();
     // rare word (~1k hits / 100 MB) and the most frequent word (~835k hits / 100 MB)
-    let patterns = [("rare", vocab[3500].clone()), ("frequent", vocab[0].clone())];
+    let patterns = [
+        ("rare", vocab[3500].clone()),
+        ("frequent", vocab[0].clone()),
+    ];
 
     for size in [16 * MB, 128 * MB] {
         let text = dataset(Profile::Prose, size);
@@ -117,7 +123,6 @@ fn search(c: &mut Criterion) {
         }
     }
 }
-
 
 /// Tree links (parent + subtree end) on `nested` documents: CPU parallel ANSV over the
 /// parsed nodes vs the GPU kernels over the nodes resident in VRAM. Each GPU iteration
