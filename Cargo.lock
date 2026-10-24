@@ -330,6 +330,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cotomet-syntax"
+version = "0.5.0"
+source = "git+https://github.com/tomet-lang/tomet.git#3c178370b20490f82ec332f704810f2725156e4c"
+dependencies = [
+ "tomet-ast",
+ "tomet-lexer",
+]
+
+[[package]]
 name = "countme"
 version = "3.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1521,7 +1530,8 @@ dependencies = [
 
 [[package]]
 name = "tomet-ast"
-version = "0.2.0"
+version = "0.5.0"
+source = "git+https://github.com/tomet-lang/tomet.git#3c178370b20490f82ec332f704810f2725156e4c"
 dependencies = [
  "serde",
  "tomet-cst",
@@ -1530,14 +1540,16 @@ dependencies = [
 
 [[package]]
 name = "tomet-cst"
-version = "0.2.0"
+version = "0.5.0"
+source = "git+https://github.com/tomet-lang/tomet.git#3c178370b20490f82ec332f704810f2725156e4c"
 dependencies = [
  "rowan",
 ]
 
 [[package]]
 name = "tomet-lexer"
-version = "0.2.0"
+version = "0.5.0"
+source = "git+https://github.com/tomet-lang/tomet.git#3c178370b20490f82ec332f704810f2725156e4c"
 dependencies = [
  "tomet-ast",
  "tomet-cst",
@@ -1545,30 +1557,23 @@ dependencies = [
 
 [[package]]
 name = "tomet-parser"
-version = "0.2.0"
+version = "0.5.0"
+source = "git+https://github.com/tomet-lang/tomet.git#3c178370b20490f82ec332f704810f2725156e4c"
 dependencies = [
+ "cotomet-syntax",
  "tomet-ast",
  "tomet-cst",
  "tomet-lexer",
  "tomet-tree",
- "tove",
  "unicode-width 0.2.2",
 ]
 
 [[package]]
 name = "tomet-tree"
-version = "0.2.0"
+version = "0.5.0"
+source = "git+https://github.com/tomet-lang/tomet.git#3c178370b20490f82ec332f704810f2725156e4c"
 dependencies = [
  "tomet-ast",
-]
-
-[[package]]
-name = "tove"
-version = "0.2.0"
-dependencies = [
- "serde",
- "tomet-ast",
- "tomet-lexer",
 ]
 
 [[package]]
