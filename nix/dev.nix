@@ -3,14 +3,12 @@
   lib,
   mkShell,
 
-  tomet,
-  tomet-shelf,
+  tools,
   ...
 }:
 mkShell {
   buildInputs = with pkgs; [
-    tomet
-    tomet-shelf
+    tools
     #= GPU
     vulkan-tools
     #= Benchmarks (simdjson comparison)

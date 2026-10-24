@@ -15,12 +15,21 @@ flake-parts.lib.mkFlake { inherit inputs; } {
   perSystem =
     { pkgs, ... }:
     let
-      inherit (inputs.tomet.packages.${pkgs.system}) tomet;
-      inherit (inputs.tomet-shelf.packages.${pkgs.system}) tomet-shelf;
+      system = pkgs.stdenv.hostPlatform.system;
+      sisho = inputs.sisho.packages.${system};
+      sishoLib = inputs.sisho.legacyPackages.${system};
     in
     {
-      devShells.default = pkgs.callPackage ./dev.nix { inherit tomet tomet-shelf; };
+      devShells.default = pkgs.callPackage ./dev.nix {
+        # sisho, tomet, twrit and catasto, with the book generator.
+        tools = sishoLib.combine [
+          sisho.toolchain
+          sisho.tomet-shelf
+        ];
+      };
 
-      treefmt = import ./formatter.nix { inherit tomet; };
+      treefmt = import ./formatter.nix {
+        inherit (sisho) tomet;
+      };
     };
 }
