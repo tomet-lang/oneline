@@ -2,22 +2,24 @@
 {
   projectRootFile = "flake.nix";
   programs = {
-    #[ Nix ]
+    #= Nix
     nixfmt.enable = true;
     statix.enable = true;
     deadnix.enable = true;
-    #[ Shell ]
+
+    #= Shell
     shfmt.enable = true;
     shellcheck.enable = true;
 
-    #[ Web ]
-    prettier.enable = true;
+    #= Main
+    rustfmt.enable = true;
+    taplo.enable = true;
   };
+
   settings = {
     global.excludes = [
-      "dist/*"
-      "package-lock.json"
-    ]; # https://github.com/numtide/treefmt-nix/issues/171
+      "*.lock"
+    ];
 
     formatter = {
       tomet = {
@@ -33,15 +35,9 @@
     shfmt = {
       includes = [ "*.sh" ];
     };
-    prettier = {
-      includes = [
-        "*.astro"
-        "*.css"
-        "*.js"
-        "*.mjs"
-        "*.ts"
-        "*.json"
-      ];
+
+    rustfmt = {
+      includes = [ "*.rs" ];
     };
   };
 }
