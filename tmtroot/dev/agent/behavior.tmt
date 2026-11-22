@@ -1,0 +1,8 @@
+=[ Precedence of Instructions ]
+
+The rules in this document serve as the project baseline and defaults.
+Explicit instructions given by the user in a conversation always take precedence over these defaults.
+
+=[ Transparent Execution ]
+
+Always state what you intend to do before doing it. Never execute non-trivial actions or commands silently.

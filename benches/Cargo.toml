@@ -1,38 +1,38 @@
 [package]
-name = "oneline-benches"
+name              = "oneline-benches"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-publish = false
+publish           = false
 
 [dependencies]
 oneline-core = { workspace = true }
+oneline-gpu  = { workspace = true }
 oneline-simd = { workspace = true }
-oneline-gpu = { workspace = true }
 #= Crates.io
-rayon = { workspace = true }
 criterion = { workspace = true }
+rayon     = { workspace = true }
 #= simdjson comparison (needs cmake; `--features simdjson`)
+simd-json    = { workspace = true, optional = true }
 simdjson-sys = { workspace = true, optional = true }
-simd-json = { workspace = true, optional = true }
-simdutf8 = { workspace = true, optional = true }
+simdutf8     = { workspace = true, optional = true }
 
 [[bench]]
-name = "parse_simd"
+name    = "parse_simd"
 harness = false
 
 [[bench]]
-name = "parse_gpu"
+name    = "parse_gpu"
 harness = false
 
 [[bench]]
-name = "comparison"
+name    = "comparison"
 harness = false
 
 [features]
 simdjson = ["dep:simdjson-sys", "dep:simd-json", "dep:simdutf8"]
 
 [[bin]]
-name = "json_compare"
-path = "src/json_compare.rs"
+name              = "json_compare"
+path              = "src/json_compare.rs"
 required-features = ["simdjson"]

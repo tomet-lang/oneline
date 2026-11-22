@@ -1,13 +1,14 @@
 [package]
-name = "oneline-tomet"
+name              = "oneline-tomet"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-oneline-core = { workspace = true }
-oneline-simd = { workspace = true }
-tomet-ast = { workspace = true }
-tomet-parser = { workspace = true }
-anyhow = { workspace = true }
-rayon = { workspace = true }
+anyhow           = { workspace = true }
+oneline-core     = { workspace = true }
+oneline-simd     = { workspace = true }
+rayon            = { workspace = true }
+tomet-ast        = { workspace = true }
+tomet-ast-parser = { workspace = true }
+tomet-span       = { workspace = true }

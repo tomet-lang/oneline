@@ -35,7 +35,7 @@ enum Commands {
         #[arg(short, long, default_value = "simd")]
         engine: Engine,
 
-        /// Convert to canonical tomet-ast Document and display
+        /// Convert to canonical tomet-ast File and display
         #[arg(long)]
         to_ast: bool,
     },

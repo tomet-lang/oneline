@@ -1,0 +1,5 @@
+- Write code and code comments in English.
+- Doc-comments (`//!`, `///`) follow clean Tomet-compatible markup conventions.
+-| When modifying function signatures, behavior, or crate responsibilities, update the
+ | corresponding doc-comments in the very same commit.
+- Never leave orphaned doc-comments that describe prior, deleted behaviors.

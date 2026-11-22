@@ -1,0 +1,2 @@
+All commands, builds, and tests must run within the Nix development environment (via `direnv` or `nix develop`). 
+Assume this environment is active and rely on the tools provided by the flake, rather than assuming or relying on global host toolchains.

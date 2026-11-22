@@ -1,0 +1,5 @@
+The repository uses Jujutsu (`jj`) in colocated mode with Git.
+
+- Favor a branchless workflow. Do not create named Git branches for regular agent tasks.
+- Use `jj describe -m "..."` to set commit messages, and `jj new` to advance to subsequent revisions.
+- Always pass `--no-pager` to `jj` subcommands (e.g. `jj status --no-pager`, `jj log --no-pager`) — without it, output can hang waiting on a pager in non-interactive/agent sessions.

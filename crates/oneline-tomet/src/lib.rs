@@ -3,20 +3,21 @@ pub mod compat;
 use anyhow::Result;
 use oneline_core::{FlatNode, FlatTree, NONE, NodeKind, TreeLinks};
 use rayon::prelude::*;
-use tomet_ast::{Block, Document, Inline, List, Paragraph, Section, Span, Text};
+use tomet_ast::{Block, File, Inline, List, Paragraph, Section, Text};
+use tomet_span::Span;
 
-/// Converts FlatTree into a canonical tomet AST (tomet_ast::Document).
+/// Converts FlatTree into a canonical tomet AST (`tomet_ast::File`).
 ///
 /// The parent/child structure comes from [`oneline_simd::build_links`] (parallel
 /// ANSV over line depths), and the per-line blocks are built in parallel too; only
 /// the final stitching of finished blocks into their parents is a sequential walk.
-pub fn to_tomet_ast(tree: &FlatTree) -> Result<Document> {
+pub fn to_tomet_ast(tree: &FlatTree) -> Result<File> {
     let links = oneline_simd::build_links(&tree.nodes);
     to_tomet_ast_with_links(tree, &links)
 }
 
 /// Like [`to_tomet_ast`] with precomputed links (e.g. when they are reused for queries).
-pub fn to_tomet_ast_with_links(tree: &FlatTree, links: &TreeLinks) -> Result<Document> {
+pub fn to_tomet_ast_with_links(tree: &FlatTree, links: &TreeLinks) -> Result<File> {
     assert_eq!(
         tree.nodes.len(),
         links.len(),
@@ -28,6 +29,15 @@ pub fn to_tomet_ast_with_links(tree: &FlatTree, links: &TreeLinks) -> Result<Doc
     // content. So a `|` line is *literal text* unless its parent is an element that is itself real
     // and that no bare blank line separates from it.
     let (literal, parent) = literal_pipe_lines(tree, links);
+    let mut has_pipe_child = vec![false; n];
+    for i in 0..n {
+        if !literal[i] && tree.nodes[i].depth > 0 {
+            let p = parent[i];
+            if p != NONE && (p as usize) < n {
+                has_pipe_child[p as usize] = true;
+            }
+        }
+    }
 
     // Each line becomes one block on its own, so this is embarrassingly parallel.
     let mut blocks: Vec<Option<Block>> = tree
@@ -45,7 +55,7 @@ pub fn to_tomet_ast_with_links(tree: &FlatTree, links: &TreeLinks) -> Result<Doc
             Some(if literal[i] {
                 literal_block(tree, i)
             } else {
-                parse_line_to_block(node, raw_text)
+                parse_line_to_block(node, raw_text, has_pipe_child[i])
             })
         })
         .collect();
@@ -72,7 +82,7 @@ pub fn to_tomet_ast_with_links(tree: &FlatTree, links: &TreeLinks) -> Result<Doc
     }
     roots.reverse();
 
-    Ok(Document::new(nest_sections(roots), Span::dummy()))
+    Ok(File::new(Vec::new(), nest_sections(roots), Span::dummy()))
 }
 
 /// `literal[i]`: line `i` starts with `|` but is not the content of an element, so tomet reads it as text.
@@ -119,8 +129,8 @@ fn literal_block(tree: &FlatTree, i: usize) -> Block {
         .get(i + 1)
         .map_or(tree.source.len(), |&e| e as usize);
     let line = tree.source[start..end].trim_end_matches(['\r', '\n']);
-    if let Ok(doc) = tomet_parser::parse_document(line) {
-        if let Some(first_block) = doc.blocks.into_iter().next() {
+    if let Ok(doc) = tomet_ast_parser::parse_file(line) {
+        if let Some(first_block) = doc.body.into_iter().next() {
             return first_block;
         }
     }
@@ -163,12 +173,12 @@ fn nest_sections(blocks: Vec<Block>) -> Vec<Block> {
 }
 
 /// Parses a single line's content and NodeKind into an initial Block.
-fn parse_line_to_block(node: &FlatNode, text: &str) -> Block {
+fn parse_line_to_block(node: &FlatNode, text: &str, has_pipe_child: bool) -> Block {
     match node.kind() {
         NodeKind::Heading => {
             // "=[ Header ]", "== Header": the level is the number of `=`, the title is parsed by tomet.
-            if let Ok(doc) = tomet_parser::parse_document(text) {
-                if let Some(first_block @ Block::Section(_)) = doc.blocks.into_iter().next() {
+            if let Ok(doc) = tomet_ast_parser::parse_file(text) {
+                if let Some(first_block @ Block::Section(_)) = doc.body.into_iter().next() {
                     return first_block;
                 }
             }
@@ -182,10 +192,21 @@ fn parse_line_to_block(node: &FlatNode, text: &str) -> Block {
             Block::Section(Section::new(level, vec![inline], Span::dummy()))
         }
         NodeKind::Element => {
-            // Use tomet-parser to parse element syntax like @card(title: "...").
-            if let Ok(doc) = tomet_parser::parse_document(text) {
-                if let Some(first_block) = doc.blocks.into_iter().next() {
+            // Use tomet-ast-parser to parse element syntax like @card(title: "...").
+            if let Ok(doc) = tomet_ast_parser::parse_file(text) {
+                if let Some(first_block) = doc.body.into_iter().next() {
                     return first_block;
+                }
+            }
+            // A bare `@name` (or `@name{...}#(id)`) with a `|` pipe run below it is valid in tomet
+            // because the pipe run supplies its primary `[content]` group.
+            if has_pipe_child {
+                let with_pipe = format!("{text}\n| ");
+                if let Ok(doc) = tomet_ast_parser::parse_file(&with_pipe) {
+                    if let Some(Block::Element(mut el)) = doc.body.into_iter().next() {
+                        el.content = None;
+                        return Block::Element(el);
+                    }
                 }
             }
             // Fallback on parse failure.
@@ -195,9 +216,9 @@ fn parse_line_to_block(node: &FlatNode, text: &str) -> Block {
             ))
         }
         NodeKind::List | NodeKind::OrderedList | NodeKind::Connect => {
-            // Use tomet-parser to parse the list item or connect line.
-            if let Ok(doc) = tomet_parser::parse_document(text) {
-                if let Some(first_block) = doc.blocks.into_iter().next() {
+            // Use tomet-ast-parser to parse the list item or connect line.
+            if let Ok(doc) = tomet_ast_parser::parse_file(text) {
+                if let Some(first_block) = doc.body.into_iter().next() {
                     return first_block;
                 }
             }
@@ -268,6 +289,11 @@ fn finish(block: Block, children: Vec<Block>) -> Vec<Block> {
             out.extend(hoisted);
             out
         }
+        other @ (Block::Hole(_) | Block::TypeSeat(_) | Block::Interp(_)) => {
+            let mut out = vec![other];
+            out.extend(children);
+            out
+        }
     }
 }
 
@@ -288,14 +314,14 @@ mod tests {
         let tree = oneline_simd::parse(text);
         let doc = to_tomet_ast(&tree).unwrap();
 
-        assert_eq!(doc.blocks.len(), 1);
-        if let Block::Element(el) = &doc.blocks[0] {
-            assert_eq!(el.sigil.name().unwrap().name, "card");
+        assert_eq!(doc.body.len(), 1);
+        if let Block::Element(el) = &doc.body[0] {
+            assert_eq!(el.name.name, "card");
             assert!(el.content.is_some());
             let content_blocks = el.content.as_ref().unwrap();
             assert_eq!(content_blocks.len(), 1);
         } else {
-            panic!("Expected Element block, got {:?}", doc.blocks[0]);
+            panic!("Expected Element block, got {:?}", doc.body[0]);
         }
     }
 

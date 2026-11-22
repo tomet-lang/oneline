@@ -1,0 +1,12 @@
+Before starting implementation on any non-trivial task, create a new file under @dir(.agents/tasks/) (one file per task, e.g. `.agents/tasks/<short-task-slug>.md`) that breaks the work into discrete steps. Update that file immediately after completing each step, marking it done. Keep it accurate and current so that if work is interrupted partway through, it can always be resumed from that file alone, without needing prior conversation context. Multiple task files may coexist under @dir(.agents/tasks/) when several non-trivial tasks are in flight; do not let one task's file block or get overwritten by another's.
+
+For non-trivial tasks, isolate work in a dedicated Jujutsu workspace under @dir(.agents/workspaces/):
+
+- Create the workspace before starting edits: `mkdir -p .agents/workspaces && jj workspace add .agents/workspaces/<short-task-slug>`
+- Perform edits, builds, and verification within that workspace directory.
+- Minor tasks (such as one-off typos or trivial single-file tweaks) may be performed directly in the default workspace.
+- When the task is completed and verified, clean up the workspace: `jj workspace forget <short-task-slug>` and remove the directory `rm -rf .agents/workspaces/<short-task-slug>`.
+
+If a session has to end early — for any reason, including a warning that a usage limit is close — stop at the next safe checkpoint. Finish the current atomic step rather than starting a new one, and write the state and the next steps into the task file before ending. Create the file at that point if the task never got one.
+
+When the task is done, fold anything worth keeping into where it belongs — a doc comment, a writ entry, a commit message — and then delete the task file. Deleting without folding is how the only copy of a decision gets lost; decide the destination when the task is created, not when it is deleted.

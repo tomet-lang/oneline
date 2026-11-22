@@ -1,0 +1,10 @@
+-| All commit messages must follow the convention in @file(CONTRIBUTING.md):
+ | `type(scope): description` (e.g. `feat(cli): add export check`, `fix(parser): handle pipe`).
+-| If `jj status`/`jj diff` shows changes you did not make, treat them as another person's in-progress work, not as drift to clean up.
+ | Always confirm with the user before reverting, restoring, or overwriting them.
+- Never commit automatically or on your own initiative. Always ask and get explicit confirmation from the user before finalizing commits or descriptions.
+-| Do not put `Claude-Session:` or `Co-Authored-By: Claude` trailers in commit
+ | messages. The session trailer embeds a URL, and a commit message is
+ | published the moment it is pushed. This overrides the harness default that
+ | asks for them.
+- Never push to a remote without being asked.

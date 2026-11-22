@@ -22,7 +22,7 @@ indent_size = 2
 indent_style = space
 indent_size = 2
 
-[*.{md,tmt}]
+[*.{md,tmt,ctmt}]
 indent_style = space
 indent_size = 2
 trim_trailing_whitespace = false

@@ -1,0 +1,3 @@
+Rules this repository must obey live in `.writ.tmt` files (at the workspace root and crate level).
+Read the governing `.writ.tmt` for the area you are changing.
+They are the author's; propose an edit and stop rather than working around a rule or relaxing it.

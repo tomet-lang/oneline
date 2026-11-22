@@ -1,0 +1,26 @@
+=[ Never edit `.md` directly ]
+
+All Markdown files are generated build artifacts, not source files.
+- Never edit a `.md` file directly.
+- Always edit the corresponding `.tmt` file under @dir(tmtroot/) (or the crate's own `.tmt`).
+- Run `tomet export` to regenerate the Markdown artifacts, and verify with `tomet export --check`.
+- Direct edits to generated `.md` files will be overwritten and will fail CI / lint checks.
+
+=[ Reference over Restatement ]
+
+Do not duplicate code signatures, struct layouts, or implementation prose into documentation files. Duplicate prose inevitably drifts.
+-| Use pointers and links (`@file(...)`, `@dir(...)`, or symbol references) instead of
+ | copy-pasting code definitions.
+-| Keep prose documentation concise and high-level, pointing directly to the code where
+ | the truth lives.
+
+=[ Source of Truth Hierarchy (Preventing Drift) ]
+
+To prevent drift between documentation and implementation:
+-.| **Behavior & API Truth**: The Rust source code and its inner doc-comments (`//!`, `///`) are the
+  | authoritative source of truth. If prose documentation contradicts the source code, the code
+  | reflects reality. Never hallucinate or enforce outdated behavior described in prose; always
+  | verify against the actual implementation.
+-.| **Architecture & Invariant Truth**: Governed by `.writ.tmt` files. These define crate layering,
+  | dependencies, and placement rules, enforced automatically by `twrit`.
+-. **Narrative & Overview Truth**: Lives in @dir(tmtroot/).

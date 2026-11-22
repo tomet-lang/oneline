@@ -12,47 +12,48 @@ members = [
 default-members = ["app"]
 
 [workspace.package]
-version = "0.1.0"
-edition = "2024"
+version      = "0.1.0"
+edition      = "2024"
 rust-version = "1.85"
-license = "MIT OR Apache-2.0"
+license      = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
-oneline-core = { path = "crates/oneline-core" }
-oneline-simd = { path = "crates/oneline-simd" }
-oneline-gpu = { path = "crates/oneline-gpu" }
+oneline-cli   = { path = "app" }
+oneline-core  = { path = "crates/oneline-core" }
+oneline-gpu   = { path = "crates/oneline-gpu" }
+oneline-simd  = { path = "crates/oneline-simd" }
 oneline-tomet = { path = "crates/oneline-tomet" }
-oneline-cli = { path = "app" }
 
 #= Tomet
-tomet-ast = { git = "https://github.com/tomet-lang/tomet.git" }
-tomet-parser = { git = "https://github.com/tomet-lang/tomet.git" }
+tomet-ast        = { git = "https://github.com/tomet-lang/tomet.git" }
+tomet-ast-parser = { git = "https://github.com/tomet-lang/tomet.git" }
+tomet-span       = { git = "https://github.com/tomet-lang/tomet.git" }
 
 #= GPU & Parallelism
 bytemuck = { version = "1", features = ["derive"] }
-rayon = "1.10"
 pollster = "0.4"
-wgpu = "24"
+rayon    = "1.10"
+wgpu     = "24"
 
 #= Crates.io
+aho-corasick = "1"
 anyhow = "1"
 clap = { version = "4.5", features = ["derive"] }
-mimalloc = { version = "0.1", default-features = false }
-memchr = "2"
-aho-corasick = "1"
 criterion = { version = "0.5", default-features = false, features = [
   "cargo_bench_support",
 ] }
-simdjson-sys = "=0.4.0-alpha.2"
+memchr = "2"
+mimalloc = { version = "0.1", default-features = false }
 simd-json = "0.18"
+simdjson-sys = "=0.4.0-alpha.2"
 simdutf8 = "0.1"
 
 [profile.release]
-opt-level = 3
-lto = "fat"
+opt-level     = 3
+lto           = "fat"
 codegen-units = 1
-panic = "abort"
-strip = true
+panic         = "abort"
+strip         = true
 
 [profile.dev.package."*"]
 opt-level = 3

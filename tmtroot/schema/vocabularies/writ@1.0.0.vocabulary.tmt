@@ -1,0 +1,20 @@
+::kind(vocabulary)
+::vocabulary(writ, version: "1.0.0")
+::element(
+  rule: (
+    display: block
+    singleton: false
+    about: | One rule, carrying its own parameters inside its group.
+           | The parameter `guard:` is required and says who guarantees the rule today: `( twrit: kind )` for a kind twrit implements,
+           | `( script: "path" )` for a script in this repository (`twrit check` executes it),
+           | `( runs: "command" )` for a runner the repository owns (twrit records who runs it and does not run it),
+           | `( test: "path" )` for a test in this repository (twrit checks only that the path exists),
+           | or `( none: "reason" )` when nobody guarantees it right now.
+           | A `none:` guard demands a reason and a missing `guard:` is an error, so that "nobody guarantees this" and "someone forgot to write it" never look alike. A guard is a pointer, not a program: a shell line embedded in an entry was rejected, because it would make a `.writ.tmt` a Makefile wearing prose.
+    args: (
+      id: (
+        type: string
+        positional: true
+        about: | The rule's identifier. The heading is prose and may be reworded; this
+               | identifier is the name a tool is held to.
+))))

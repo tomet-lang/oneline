@@ -1,9 +1,9 @@
 [package]
-name = "oneline-core"
+name              = "oneline-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
+anyhow   = { workspace = true }
 bytemuck = { workspace = true }
-anyhow = { workspace = true }

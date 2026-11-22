@@ -1,0 +1,85 @@
+::kind(vocabulary)
+::vocabulary(catasto, version: "1.0.0")
+::attribute(
+  upstream: (
+    about: | Git repositories, each named once (`name: catasto.git(url, rev: main, root: dir)`), that entries take files from with `catasto.upstream(name, path: ...)`.
+    host: ctmt
+  )
+  zone: (
+    about: | Directory rules, keyed by a workspace path pattern: what a directory must hold, may hold, and must not hold.
+    host: ctmt
+))
+::constructor(
+  git: (
+    about: | A file or repository in Git.
+    args: (
+      url: (
+        type: string
+        positional: true
+        required: true
+        about: | Repository URL (`https://` URL or workspace-relative path).
+      )
+      rev: (
+        type: string
+        default: main
+        about: | Pinned tag, branch, or commit hash. Quote numeric revisions (e.g. `rev: "1.2"`).
+      )
+      root: (
+        type: string
+        about: | Directory inside the upstream repository that entry paths start from (used in `::upstream`).
+      )
+      path: (
+        type: string
+        about: | Location of the file inside the Git repository (required for manifest entries).
+      )
+      symlink: (
+        type: string
+        default: follow
+        about: | How symlinks in the repository are handled (`follow` or `keep`).
+  )))
+  upstream: (
+    about: | A file from an upstream repository declared in `::upstream(...)`.
+    args: (
+      upstream: (
+        type: string
+        positional: true
+        required: true
+        about: | Name of an upstream declared in `::upstream(...)`.
+      )
+      path: (
+        type: string
+        required: true
+        about: | Location of the file inside the upstream repository (relative to `root` if set).
+      )
+      symlink: (
+        type: string
+        default: follow
+        about: | How symlinks in the repository are handled (`follow` or `keep`).
+  )))
+  local: (
+    about: | A file on the local filesystem, relative to the workspace root.
+    args: (
+      path: (
+        type: string
+        positional: true
+        required: true
+        about: | Path to the local source file, relative to the workspace root.
+  )))
+  repo: (
+    about: | A Git repository cloned as a directory or submodule in the workspace.
+    args: (
+      url: (
+        type: string
+        positional: true
+        required: true
+        about: | Repository URL (`https://` URL or workspace-relative path).
+      )
+      branch: (
+        type: string
+        about: | Branch to check out and track.
+      )
+      submodule: (
+        type: bool
+        default: false
+        about: | Whether to register the repository in `.gitmodules`.
+))))

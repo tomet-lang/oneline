@@ -1,0 +1,12 @@
+=[ User-First Design over Developer Convenience ]
+
+Always prioritize the end-user experience, syntax ergonomics, and API design.
+If there is tension between developer or implementation convenience and user simplicity, user simplicity must always win.
+Never compromise user experience just because an implementation is easier.
+
+=[ Resist Path-of-Least-Resistance & Legacy Bias ]
+
+The existing implementation is never a justification or reason for new design choices.
+- Do not justify decisions with "it is already implemented this way, so let's stick with it."
+- Prioritize architectural beauty, elegance, and long-term correctness over the path of least resistance.
+- Understand the existing context thoroughly, but never take shortcuts or settle for lazy patches.

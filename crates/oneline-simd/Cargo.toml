@@ -1,5 +1,5 @@
 [package]
-name = "oneline-simd"
+name              = "oneline-simd"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,7 +7,7 @@ license.workspace = true
 [dependencies]
 oneline-core = { workspace = true }
 #= Crates.io
-anyhow = { workspace = true }
-rayon = { workspace = true }
-memchr = { workspace = true }
 aho-corasick = { workspace = true }
+anyhow       = { workspace = true }
+memchr       = { workspace = true }
+rayon        = { workspace = true }

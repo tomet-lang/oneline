@@ -28,11 +28,8 @@ pub fn run_parse(file: &Path, engine: Engine, to_ast: bool) -> Result<()> {
     if to_ast {
         let ast = oneline_tomet::to_tomet_ast(&tree)
             .context("Failed to convert FlatTree to tomet AST")?;
-        println!(
-            "\nTomet AST Document ({} top-level blocks):",
-            ast.blocks.len()
-        );
-        for (i, block) in ast.blocks.iter().enumerate() {
+        println!("\nTomet AST File ({} top-level blocks):", ast.body.len());
+        for (i, block) in ast.body.iter().enumerate() {
             println!("  [{}] {:#?}", i, block);
         }
     } else {

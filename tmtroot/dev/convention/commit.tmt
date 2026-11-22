@@ -1,0 +1,19 @@
+All commits must follow the Conventional Commits format: `type(scope): description`.
+
+=[ Types ]
+
+- (feat) New feature or capability.
+- (fix) Bug fix.
+- (docs) Documentation changes (`.tmt` or exported docs).
+- (refactor) Code restructuring without changing behavior.
+- (perf) Performance improvement.
+- (test) Adding or correcting tests.
+- (chore) Build scripts, dependencies, tooling, repo maintenance.
+
+=[ Scopes ]
+
+Use the affected component or crate name as the scope and `nix`, `ci`, `deps`, `rule` (for `.writ.tmt`)
+
+@callout(tip)
+| If a change spans multiple components or the whole workspace,
+| omit the scope or use a broad category (e.g. `refactor(crates): ...` or `chore: update dependencies`).

@@ -6,7 +6,7 @@
 //! The rest groups a corpus into small units and into line shapes, so that disagreements can be
 //! counted and looked at.
 
-use tomet_ast::Document;
+use tomet_ast::File;
 
 /// Result of parsing one text with tomet's parser and with oneline.
 pub enum Outcome {
@@ -21,7 +21,7 @@ pub enum Outcome {
 }
 
 pub fn compare(text: &str) -> Outcome {
-    let real: Document = match tomet_parser::parse_document(text) {
+    let real: File = match tomet_ast_parser::parse_file(text) {
         Ok(doc) => doc,
         Err(e) => return Outcome::ReferenceError(format!("{e:?}")),
     };
