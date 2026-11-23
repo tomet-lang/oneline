@@ -145,16 +145,25 @@
       },
       "commit": "f5917d73c8cc20837a93d826828a9df67471ba58"
     },
-    "tmtroot/schema/vocabularies/catasto@1.0.0.vocabulary.tmt": {
+    "tmtroot/schema/catasto@1.0.0.blueprint.ctmt": {
+      "sha256": "1fdf340842664a081c66ecebf956fb0e1a17483820ced2677242572e8b278001",
+      "source": {
+        "git": "https://github.com/tomet-lang/fs-catasto.git",
+        "rev": "main",
+        "path": "tmtroot/schema/catasto@1.0.0.blueprint.ctmt"
+      },
+      "commit": "4eb2b144b956ce4f78848a9f2f9da92678255992"
+    },
+    "tmtroot/schema/catasto@1.0.0.vocabulary.tmt": {
       "sha256": "3259c87a389a1bf6ab279c195ef330f6600bdb551c0a768f38a338b7d9787be5",
       "source": {
         "git": "https://github.com/tomet-lang/fs-catasto.git",
         "rev": "main",
-        "path": "tmtroot/schema/vocabularies/catasto@1.0.0.vocabulary.tmt"
+        "path": "tmtroot/schema/catasto@1.0.0.vocabulary.tmt"
       },
-      "commit": "1aeeb6d0cc2938efb06c7bc47ab09263c7d73035"
+      "commit": "4eb2b144b956ce4f78848a9f2f9da92678255992"
     },
-    "tmtroot/schema/vocabularies/rust@1.0.0.vocabulary.tmt": {
+    "tmtroot/schema/rust@1.0.0.vocabulary.tmt": {
       "sha256": "41b022ca9a034d7894d041039fc85fb793a4e5149da52ccc3191e88056430209",
       "source": {
         "git": "https://github.com/tomet-lang/vocabularies.git",
@@ -163,7 +172,7 @@
       },
       "commit": "8ab83d3f78a821e8ad65b4e49584dd6e3c85047e"
     },
-    "tmtroot/schema/vocabularies/writ@1.0.0.vocabulary.tmt": {
+    "tmtroot/schema/writ@1.0.0.vocabulary.tmt": {
       "sha256": "2662a7f93d70d90f0e6de79a333036a01e89875b6ceeb11f5a7207e263ef4677",
       "source": {
         "git": "https://github.com/tomet-lang/vocabularies.git",

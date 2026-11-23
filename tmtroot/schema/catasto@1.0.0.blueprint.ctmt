@@ -1,0 +1,16 @@
+::kind(blueprint)
+::blueprint(catasto)
+// Named upstream git repositories.
+::upstream(<$string(optional: true)>: <$catasto.git>)
+// Directory schema and path matching rules.
+::zone(<$string(optional: true)>: (
+  require: <$enum(string, list(string), optional: true)>
+  allow: <$enum(string, list(string), optional: true)>
+  deny: <$enum(string, list(string), optional: true)>
+  ignore: <$enum(string, list(string), optional: true)>
+  recursive: <$bool(optional: true)>
+  files: <$enum((require: enum(string, list(string), optional: true), allow: enum(string, list(string), optional: true), deny: enum(string, list(string), optional: true)), optional: true)>
+  dirs: <$enum((require: enum(string, list(string), optional: true), allow: enum(string, list(string), optional: true), deny: enum(string, list(string), optional: true)), optional: true)>
+))
+
+<$string>: <$enum(catasto.repo, enum(catasto.git, catasto.upstream, catasto.local), (enum(catasto.git, catasto.upstream, catasto.local), executable: bool(optional: true)))>

@@ -2,7 +2,7 @@
 ::upstream(
   commonfiles:  catasto.git("https://github.com/tomet-lang/commonfiles.git", rev: main, root: base)
   vocabularies: catasto.git("https://github.com/tomet-lang/vocabularies.git", rev: main, root: vocabularies)
-  fs_catasto:   catasto.git("https://github.com/tomet-lang/fs-catasto.git", rev: "main", root: "tmtroot/schema/vocabularies")
+  fs_catasto:   catasto.git("https://github.com/tomet-lang/fs-catasto.git", rev: "main", root: "tmtroot/schema")
 )
 
 // --- Tomet ---
@@ -17,10 +17,11 @@
 "tmtroot/dev/howto/jj.tmt":                catasto.upstream(commonfiles, path: "tmtroot/dev/howto/jj.tmt")
 "tmtroot/dev/howto/nix.tmt":               catasto.upstream(commonfiles, path: "tmtroot/dev/howto/nix.tmt")
 
-// --- Vocabularies ---
-"tmtroot/schema/vocabularies/catasto@1.0.0.vocabulary.tmt": catasto.upstream(fs_catasto, path: "catasto@1.0.0.vocabulary.tmt")
-"tmtroot/schema/vocabularies/rust@1.0.0.vocabulary.tmt":    catasto.upstream(vocabularies, path: "rust/rust@1.0.0.vocabulary.tmt")
-"tmtroot/schema/vocabularies/writ@1.0.0.vocabulary.tmt":    catasto.upstream(vocabularies, path: "writ/writ@1.0.0.vocabulary.tmt")
+// --- Schema ---
+"tmtroot/schema/catasto@1.0.0.vocabulary.tmt": catasto.upstream(fs_catasto, path: "catasto@1.0.0.vocabulary.tmt")
+"tmtroot/schema/catasto@1.0.0.blueprint.ctmt": catasto.upstream(fs_catasto, path: "catasto@1.0.0.blueprint.ctmt")
+"tmtroot/schema/rust@1.0.0.vocabulary.tmt":    catasto.upstream(vocabularies, path: "rust/rust@1.0.0.vocabulary.tmt")
+"tmtroot/schema/writ@1.0.0.vocabulary.tmt":    catasto.upstream(vocabularies, path: "writ/writ@1.0.0.vocabulary.tmt")
 
 // --- Environment ---
 ".editorconfig":  catasto.upstream(commonfiles, path: ".editorconfig")
